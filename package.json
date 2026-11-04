@@ -1,0 +1,17 @@
+{
+  "name": "opencode-monitor-task",
+  "version": "2.0.0",
+  "private": true,
+  "type": "module",
+  "workspaces": ["packages/*"],
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "node --import tsx --test 'test/*.test.ts' 'packages/*/test/*.test.ts'",
+    "test:fast": "node --import tsx --test 'test/*.test.ts' 'packages/*/test/*.test.ts' 2>&1 | tail -5"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.7.0"
+  }
+}
