@@ -104,6 +104,12 @@ test("empty command rejected", () => {
   assert.equal(checkCommand("   ").ok, false);
 });
 
+test("degenerate '&' rejected after stripping", () => {
+  const r = checkCommand("&");
+  assert.equal(r.ok, false);
+  assert.match(r.reason!, /empty/);
+});
+
 test("plain pipe and redirect fine", () => {
   assert.equal(checkCommand("kubectl logs -f pod | grep ERROR > err.txt").ok, true);
 });
@@ -127,9 +133,28 @@ test("minimal valid input gets defaults", () => {
   assert.equal(r.value?.idle_timeout_ms, 300_000);
 });
 
+test("trailing & is stripped in validated value", () => {
+  const r = validateCreateInput({ ...valid, command: "sleep 60 &" });
+  assert.equal(r.ok, true);
+  assert.equal(r.value?.command, "sleep 60");
+});
+
+test("degenerate '&' rejected at input validation", () => {
+  const r = validateCreateInput({ ...valid, command: "&" });
+  assert.equal(r.ok, false);
+  assert.equal(r.violations[0]?.field, "command");
+});
+
 test("pattern implies wake_mode=pattern", () => {
   const r = validateCreateInput({ ...valid, pattern: "ERROR" });
   assert.equal(r.value?.wake_mode, "pattern");
+});
+
+test("empty pattern normalized to undefined (wake_mode stays all)", () => {
+  const r = validateCreateInput({ ...valid, pattern: "" });
+  assert.equal(r.ok, true);
+  assert.equal(r.value?.pattern, undefined);
+  assert.equal(r.value?.wake_mode, "all");
 });
 
 test("explicit wake_mode=all with pattern kept (只统计不过滤)", () => {

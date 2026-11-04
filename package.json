@@ -6,8 +6,7 @@
   "workspaces": ["packages/*"],
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "test": "node --import tsx --test 'test/*.test.ts' 'packages/*/test/*.test.ts'",
-    "test:fast": "node --import tsx --test 'test/*.test.ts' 'packages/*/test/*.test.ts' 2>&1 | tail -5"
+    "test": "node --import tsx --test 'test/*.test.ts' 'packages/*/test/*.test.ts'"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

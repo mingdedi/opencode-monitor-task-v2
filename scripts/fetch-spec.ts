@@ -3,23 +3,13 @@
 //
 // 用法: node --import tsx scripts/fetch-spec.ts
 
-import { mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { opencodeAuthHeader, readOpencodeService } from "../packages/shared/src/ocservice.ts";
 
-const stateHome =
-  process.env.XDG_STATE_HOME && process.env.XDG_STATE_HOME.startsWith("/")
-    ? process.env.XDG_STATE_HOME
-    : path.join(homedir(), ".local/state");
-
-const svcPath = path.join(stateHome, "opencode", "service.json");
-const svc = JSON.parse(readFileSync(svcPath, "utf8")) as {
-  url: string;
-  password: string;
-  pid: number;
-};
-
-const auth = "Basic " + Buffer.from(`opencode:${svc.password}`).toString("base64");
+const svc = readOpencodeService();
+const auth = opencodeAuthHeader(svc);
 const res = await fetch(`${svc.url}/openapi.json`, { headers: { authorization: auth } });
 if (!res.ok) {
   console.error(`GET /openapi.json -> ${res.status}`);
@@ -45,14 +35,9 @@ for (const [label, needle] of [
 }
 
 const version = spec.info?.version ?? "unknown";
-const dir = path.join(import.meta.dirname, "..", "test", "fixtures");
-// 只保留一份快照（旧的删除，避免版本堆积）
+// 多版本快照共存（供版本矩阵对照），过期版本手动清理
+const dir = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "test", "fixtures");
 mkdirSync(dir, { recursive: true });
-for (const f of readdirSync(dir)) {
-  if (/^openapi-.*\.json$/.test(f)) {
-    // 保留，多版本共存以供版本矩阵；手动清理即可
-  }
-}
 const out = path.join(dir, `openapi-${version}.json`);
 writeFileSync(out, JSON.stringify(spec, null, 2) + "\n");
 console.log(

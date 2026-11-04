@@ -5,20 +5,10 @@
 //
 // 用法: node --import tsx scripts/probe-synthetic.ts
 
-import { readFileSync } from "node:fs";
-import { homedir } from "node:os";
-import path from "node:path";
+import { readOpencodeService, opencodeAuthHeader } from "../packages/shared/src/ocservice.ts";
 
-const stateHome =
-  process.env.XDG_STATE_HOME && process.env.XDG_STATE_HOME.startsWith("/")
-    ? process.env.XDG_STATE_HOME
-    : path.join(homedir(), ".local/state");
-const svc = JSON.parse(readFileSync(path.join(stateHome, "opencode", "service.json"), "utf8")) as {
-  url: string;
-  password: string;
-};
-
-const auth = "Basic " + Buffer.from(`opencode:${svc.password}`).toString("base64");
+const svc = readOpencodeService();
+const auth = opencodeAuthHeader(svc);
 
 async function api(method: string, p: string, body?: unknown) {
   const res = await fetch(`${svc.url}${p}`, {
@@ -37,8 +27,10 @@ async function api(method: string, p: string, body?: unknown) {
 }
 
 const mask = (s: string) => (s.length > 10 ? `${s.slice(0, 10)}…` : s);
+/** 输出脱敏：完整 session id 不落终端（开源卫生） */
+const maskSessionIds = (text: string) => text.replace(/ses_[A-Za-z0-9]+/g, (m) => mask(m));
 function show(label: string, r: { status: number; json: unknown }) {
-  console.log(`${label.padEnd(34)} -> ${r.status} ${JSON.stringify(r.json).slice(0, 220)}`);
+  console.log(`${label.padEnd(34)} -> ${r.status} ${maskSessionIds(JSON.stringify(r.json)).slice(0, 220)}`);
 }
 
 // --- setup: 专用测试 session ---

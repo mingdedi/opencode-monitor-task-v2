@@ -161,6 +161,9 @@ export function checkCommand(raw: string): CommandCheck {
     }
     break;
   }
+  if (cmd === "") {
+    return { ok: false, reason: "command is empty after stripping trailing &", command: "" };
+  }
   const result = scan(cmd);
   if (result.violations.length > 0) {
     return { ok: false, reason: result.violations[0], command: cmd };
@@ -193,12 +196,14 @@ export function validateCreateInput(input: unknown): CreateValidation {
   }
   const raw = input as Record<string, unknown>;
 
-  // command（必填）
+  // command（必填）；保存剥离后台 & 后的命令作为下游执行命令
+  let command: string | undefined;
   if (typeof raw["command"] !== "string" || raw["command"].trim() === "") {
     v.push({ field: "command", message: "non-empty string required" });
   } else {
     const check = checkCommand(raw["command"]);
     if (!check.ok) v.push({ field: "command", message: check.reason ?? "invalid command" });
+    else command = check.command;
   }
 
   // opencode_port（必填，白名单校验在服务端 opencode 层）
@@ -219,16 +224,13 @@ export function validateCreateInput(input: unknown): CreateValidation {
     v.push({ field: "description", message: `string ≤ ${LIMITS.descriptionMaxChars} chars` });
   }
 
-  // pattern（合法正则）
-  if (raw["pattern"] !== undefined && raw["pattern"] !== null) {
-    if (typeof raw["pattern"] !== "string") {
-      v.push({ field: "pattern", message: "string (regex) required" });
-    } else {
-      try {
-        void new RegExp(raw["pattern"]);
-      } catch (err) {
-        v.push({ field: "pattern", message: `invalid regex: ${(err as Error).message}` });
-      }
+  // pattern（合法正则；null/空串规范化为未提供）
+  const pattern = typeof raw["pattern"] === "string" && raw["pattern"] !== "" ? raw["pattern"] : undefined;
+  if (pattern !== undefined) {
+    try {
+      void new RegExp(pattern);
+    } catch (err) {
+      v.push({ field: "pattern", message: `invalid regex: ${(err as Error).message}` });
     }
   }
 
@@ -275,13 +277,13 @@ export function validateCreateInput(input: unknown): CreateValidation {
 
   if (v.length > 0) return { ok: false, violations: v };
 
-  const pattern = raw["pattern"] as string | undefined;
   const value: CreateTaskInput = {
-    command: (raw["command"] as string).trim(),
+    // checkCommand 剥离尾部 & 后的执行命令（v 非空已提前 return，此处必已赋值）
+    command: command!,
     opencode_port: raw["opencode_port"] as number,
     session_id: raw["session_id"] as string,
     description: (raw["description"] as string | undefined) ?? undefined,
-    pattern: pattern ?? undefined,
+    pattern,
     wake_mode: (raw["wake_mode"] as WakeMode | undefined) ?? (pattern ? "pattern" : "all"),
     delivery: (raw["delivery"] as Delivery | undefined) ?? "queue",
     coalesce_ms: (raw["coalesce_ms"] as number | undefined) ?? LIMITS.defaultCoalesceMs,
