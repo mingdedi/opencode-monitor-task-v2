@@ -1,6 +1,23 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { checkCommand, validateCreateInput } from "../packages/shared/src/validate.ts";
+import { checkCommand, validateCreateInput, versionCompatible } from "../packages/shared/src/validate.ts";
+
+// ---------------------------------------------------------------------------
+// 发现流程版本兼容判定（SERVER-PLAN §三-3：major.minor 相等即复用）
+
+test("versionCompatible: major.minor equal → compatible (patch differs)", () => {
+  assert.equal(versionCompatible("0.1.0", "0.1.9"), true);
+  assert.equal(versionCompatible("2.2.5", "2.2.0"), true);
+});
+
+test("versionCompatible: minor or major differs → incompatible", () => {
+  assert.equal(versionCompatible("0.1.0", "0.2.0"), false);
+  assert.equal(versionCompatible("0.1.0", "1.1.0"), false);
+});
+
+test("versionCompatible: malformed running version → incompatible (fail safe)", () => {
+  assert.equal(versionCompatible("0.1.0", "garbage"), false);
+});
 
 // ---------------------------------------------------------------------------
 // 命令校验（v1 规则，PLAN §3.3）

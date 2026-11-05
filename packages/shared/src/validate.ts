@@ -171,6 +171,13 @@ export function checkCommand(raw: string): CommandCheck {
   return { ok: true, command: cmd };
 }
 
+/** 发现流程版本兼容判定：major.minor 相等即复用，patch 视为兼容（SERVER-PLAN §三-3） */
+export function versionCompatible(mine: string, running: string): boolean {
+  const a = mine.split(".");
+  const b = running.split(".");
+  return a[0] === b[0] && a[1] === b[1];
+}
+
 // ---------------------------------------------------------------------------
 // CreateTaskInput 校验（服务端 POST /api/tasks 入口；白名单/session 存活校验在 opencode 层）
 
