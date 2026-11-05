@@ -1,9 +1,10 @@
-// 服务端入口（PLAN §2.1 / §6.1；SERVER-PLAN 阶段 B 最小版 + 阶段 C 注册表接线）
+// 服务端入口（PLAN §2.1 / §6.1；SERVER-PLAN 阶段 B 最小版 + 阶段 C 注册表接线 + 阶段 D 任务闭环）
 // 职责：platform gate → 单实例锁（O_EXCL，内容含 pid）→ 127.0.0.1 随机端口监听
 //       → service.json 600 原子写 → 信号处理（默认不杀任务，PLAN §2.1 退出语义）
 //       → 日志落 state 目录（不记命令全文，DEBUG=1 才详细，PLAN §4）
 //       → opencode 实例注册表（--opencode-state 多条目，§2.8.1；health 实例表实测）
-// 仍不含：任务执行（D+）、reattach（G）、/api/shutdown（G）。
+//       → 任务注册表 + 任务端点装配（阶段 D：POST /api/tasks + GET 列表/详情）
+// 仍不含：管理端点（F）、reattach（G）、/api/shutdown（G）。
 //
 // 创建竞态语义（PLAN §2.1-4）：先原子抢锁 → in-use 后到者核对/等待已有 service.json 的 health，
 // 健康则打印后退出码 0（后到者自然退出，service.json 由最终存活者持有）；死持锁者可抢。
@@ -33,8 +34,10 @@ import {
   type PathEnv,
   type ServiceFile,
 } from "@omt/shared";
-import { createMonitorHttpServer } from "./http.ts";
+import { createMonitorHttpServer, type TaskEndpointOutcome } from "./http.ts";
 import { buildRegistry, parseOpencodeStateArgs, probeInstances, type OpencodeRegistry } from "./opencode.ts";
+import { createTask } from "./monitor.ts";
+import { TaskRegistry } from "./registry.ts";
 import { ensurePrivateDir, writeFileAtomic } from "./taskstore.ts";
 
 export const SERVER_VERSION: string = (
@@ -216,10 +219,13 @@ export async function main(
   }
 
   // opencode 实例注册表（§2.8.1 白名单：默认共享服务 + --opencode-state 追加，路径去重）
-  const registry: OpencodeRegistry = buildRegistry(paths, opencodeStatePaths);
+  const ocRegistry: OpencodeRegistry = buildRegistry(paths, opencodeStatePaths);
   if (opencodeStatePaths.length > 0) {
     log(`opencode registry: default + ${opencodeStatePaths.length} extra --opencode-state path(s)`);
   }
+
+  // 任务注册表（阶段 D：簿记 + health 计数 + 端点聚合；F 阶段加上限/驱逐，G 加 store 合并视图）
+  const tasks = new TaskRegistry();
 
   // --- 单实例锁 ---
   const lockPath = lockFilePath(paths);
@@ -312,15 +318,36 @@ export async function main(
       id,
       version: SERVER_VERSION,
       uptime_s: Math.floor((Date.now() - startedAt) / 1000),
-      tasks_alive: 0, // 任务执行 D+ 阶段接入
-      tasks_total: 0,
+      tasks_alive: tasks.aliveCount(),
+      tasks_total: tasks.size,
       reattach: null, // G 阶段接入（PLAN §2.9-5）
-      opencode_instances: await probeInstances(registry, paths),
+      opencode_instances: await probeInstances(ocRegistry, paths),
       log_bytes: logBytes,
     };
   };
 
-  const server = createMonitorHttpServer({ password, health });
+  // 任务端点装配（阶段 D：创建 + 列表 + 详情；F 阶段补 stop/keepalive/PATCH/DELETE/log）
+  const tasksApi = {
+    create: async (body: unknown): Promise<TaskEndpointOutcome> => {
+      const r = await createTask(
+        { env: paths, ocRegistry, registry: tasks, log },
+        body,
+      );
+      return r.ok ? { status: 201, body: r.info } : { status: r.status, body: r.error };
+    },
+    list: (sessionId: string | undefined): TaskEndpointOutcome => ({
+      status: 200,
+      body: tasks.listInfos(sessionId),
+    }),
+    get: (id: string): TaskEndpointOutcome => {
+      const t = tasks.get(id);
+      return t
+        ? { status: 200, body: t.toPublicInfo() }
+        : { status: 404, body: { error: `task ${id} not found`, code: "TASK_NOT_FOUND" } };
+    },
+  };
+
+  const server = createMonitorHttpServer({ password, health, tasks: tasksApi });
   try {
     await new Promise<void>((resolve, reject) => {
       server.once("error", reject);

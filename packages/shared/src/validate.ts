@@ -186,11 +186,25 @@ export interface ParamViolation {
   message: string;
 }
 
-export interface CreateValidation {
-  ok: boolean;
-  violations: ParamViolation[];
-  value?: CreateTaskInput;
+/** validateCreateInput 产物：可选参数已全部解析默认值——下游无需再判 undefined */
+export interface ResolvedCreateInput {
+  command: string;
+  opencode_port: number;
+  session_id: string;
+  description?: string;
+  pattern?: string;
+  wake_mode: WakeMode;
+  delivery: Delivery;
+  coalesce_ms: number;
+  max_events: number;
+  idle_timeout_ms: number;
+  directory?: string;
 }
+
+/** discriminated union（§6.2 纪律）：ok true 时 value 必在 */
+export type CreateValidation =
+  | { ok: true; violations: []; value: ResolvedCreateInput }
+  | { ok: false; violations: ParamViolation[] };
 
 function isInt(v: unknown): v is number {
   return typeof v === "number" && Number.isInteger(v);
@@ -284,7 +298,7 @@ export function validateCreateInput(input: unknown): CreateValidation {
 
   if (v.length > 0) return { ok: false, violations: v };
 
-  const value: CreateTaskInput = {
+  const value: ResolvedCreateInput = {
     // checkCommand 剥离尾部 & 后的执行命令（v 非空已提前 return，此处必已赋值）
     command: command!,
     opencode_port: raw["opencode_port"] as number,

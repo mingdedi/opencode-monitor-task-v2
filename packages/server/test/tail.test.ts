@@ -1,0 +1,95 @@
+// LogTail 单测（SERVER-PLAN 阶段 D）：真文件 append + 轮询读；
+// 多字节边界（StringDecoder）、partial 行跨 poll 保留、行安全 offset 语义
+import assert from "node:assert/strict";
+import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { test, before, after } from "node:test";
+import { LIMITS } from "@omt/shared";
+import { LogTail } from "../src/tail.ts";
+
+let root: string;
+let logPath: string;
+let seq = 0;
+
+before(() => {
+  root = mkdtempSync(path.join(tmpdir(), "omt-tail-"));
+});
+
+after(() => {
+  rmSync(root, { recursive: true, force: true });
+});
+
+function newLog(): string {
+  logPath = path.join(root, `log-${seq++}`);
+  writeFileSync(logPath, "", { mode: 0o600 });
+  return logPath;
+}
+
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+test("增量读：append 后下一 poll 出行，未 append 时空轮", async () => {
+  const t = new LogTail(newLog());
+  assert.deepEqual(t.poll(), { lines: [], bytesConsumed: 0 }); // 空（EOF）
+  appendFileSync(logPath, "hello\n");
+  assert.deepEqual(t.poll(), { lines: ["hello"], bytesConsumed: 6 });
+  assert.deepEqual(t.poll(), { lines: [], bytesConsumed: 0 }); // 无新数据
+  t.close();
+});
+
+test("partial 行：跨 poll 保留残余，成行后整行交付", async () => {
+  const t = new LogTail(newLog());
+  appendFileSync(logPath, "abc");
+  const r1 = t.poll();
+  assert.deepEqual(r1.lines, []);
+  assert.equal(r1.bytesConsumed, 3);
+  assert.equal(t.pendingBytes(), 3); // 行安全 offset 应回退这 3 字节
+  appendFileSync(logPath, "def\n");
+  const r2 = t.poll();
+  assert.deepEqual(r2.lines, ["abcdef"]);
+  assert.equal(t.pendingBytes(), 0);
+  t.close();
+});
+
+test("多字节边界：半个 UTF-8 字符跨 append，不产残字符", async () => {
+  const t = new LogTail(newLog());
+  const ch = "中"; // U+4E2D，3 字节
+  const buf = Buffer.from(ch, "utf8");
+  appendFileSync(logPath, buf.subarray(0, 2)); // 只写前 2 字节
+  assert.deepEqual(t.poll().lines, []);
+  appendFileSync(logPath, Buffer.concat([buf.subarray(2), Buffer.from("\n")]));
+  assert.deepEqual(t.poll().lines, [ch]);
+  t.close();
+});
+
+test("清洗集成：cleanLine 在 tail 层完成（ANSI/空行不出门）", async () => {
+  const t = new LogTail(newLog());
+  appendFileSync(logPath, "\x1b[32mok\x1b[0m\n\n   \nplain\n");
+  assert.deepEqual(t.poll().lines, ["ok", "plain"]);
+  t.close();
+});
+
+test("行安全 offset：last_offset 语义（总读字节 - pendingBytes）", async () => {
+  const t = new LogTail(newLog());
+  appendFileSync(logPath, "line1\npart"); // 6 + 4 = 10 字节，行安全点 = 6
+  const r = t.poll();
+  assert.equal(r.bytesConsumed, 10);
+  assert.equal(10 - t.pendingBytes(), 6);
+  t.close();
+  // 从行安全点重开（G 阶段 reattach 语义）：不丢不重不拼残行
+  const t2 = new LogTail(logPath, 6);
+  appendFileSync(logPath, "ial2\n");
+  assert.deepEqual(t2.poll().lines, ["partial2"]);
+  t2.close();
+});
+
+test("大 chunk：超过单次读缓冲（64KB）循环读尽；无换行长行按 v1 语义截断 2000 字符", async () => {
+  const t = new LogTail(newLog());
+  const big = `${"y".repeat(70_000)}\n`;
+  appendFileSync(logPath, big);
+  const r = t.poll();
+  assert.equal(r.lines.length, 1);
+  assert.equal(r.lines[0]!.length, LIMITS.lineMaxChars, "cleanLine 单行截断语义");
+  assert.equal(r.bytesConsumed, Buffer.byteLength(big));
+  t.close();
+});

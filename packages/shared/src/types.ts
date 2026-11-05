@@ -42,6 +42,8 @@ export const LIMITS = {
   maxMaxEvents: 10_000,
   /** idle_timeout_ms 上界（含） */
   maxIdleTimeoutMs: 3_600_000,
+  /** 服务端 HTTP 请求体上限（防滥用；任务参数远小于此） */
+  httpBodyMaxBytes: 262_144,
 } as const;
 
 export type WakeMode = "all" | "pattern";

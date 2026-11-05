@@ -164,6 +164,7 @@ test("degenerate '&' rejected at input validation", () => {
 
 test("pattern implies wake_mode=pattern", () => {
   const r = validateCreateInput({ ...valid, pattern: "ERROR" });
+  assert.equal(r.ok, true);
   assert.equal(r.value?.wake_mode, "pattern");
 });
 
@@ -176,6 +177,7 @@ test("empty pattern normalized to undefined (wake_mode stays all)", () => {
 
 test("explicit wake_mode=all with pattern kept (只统计不过滤)", () => {
   const r = validateCreateInput({ ...valid, pattern: "ERROR", wake_mode: "all" });
+  assert.equal(r.ok, true);
   assert.equal(r.value?.wake_mode, "all");
 });
 

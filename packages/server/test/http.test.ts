@@ -1,9 +1,9 @@
-// http 层单测：鉴权/路由/错误形状（SERVER-PLAN 阶段 B，仅 health）
+// http 层单测：鉴权/路由/错误形状（SERVER-PLAN 阶段 B，仅 health + 阶段 D 任务端点）
 import assert from "node:assert/strict";
 import { test, before, after } from "node:test";
 import type { AddressInfo } from "node:net";
-import { createMonitorHttpServer } from "../src/http.ts";
-import type { HealthInfo } from "@omt/shared";
+import { createMonitorHttpServer, type TasksApi } from "../src/http.ts";
+import type { ApiError, HealthInfo, PublicInfo } from "@omt/shared";
 
 const PASSWORD = "test-password-123";
 let base = "";
@@ -84,6 +84,157 @@ test("health 抛错 → 500 JSON（不裸崩连接）", async () => {
   const res = await fetch(u + "/api/health", { headers: { authorization: auth(PASSWORD) } });
   assert.equal(res.status, 500);
   assert.equal(((await res.json()) as { error: string }).error, "internal error");
+  srv.close();
+  srv.closeAllConnections();
+});
+
+// ---------------------------------------------------------------------------
+// 任务端点（阶段 D）：路由/鉴权/状态映射/body 防护——业务经注入 stub
+
+const stubInfo: PublicInfo = {
+  id: "mon_stub0001",
+  description: null,
+  state: "running",
+  session_id: "ses_stub",
+  opencode_port: 1,
+  directory: "/tmp",
+  command: "echo stub",
+  pattern: null,
+  wake_mode: "all",
+  delivery: "queue",
+  coalesce_ms: 500,
+  max_events: 50,
+  idle_timeout_ms: 300000,
+  idle_deadline: null,
+  grace_deadline: null,
+  started_at: 1,
+  pid: 123,
+  lines_scanned: 0,
+  lines_matched: 0,
+  events_sent: 0,
+  events_dropped: 0,
+  exit_info: null,
+  log_bytes: 0,
+  last_offset: 0,
+  updated_at: 1,
+};
+
+async function withTaskServer(opts: Partial<TasksApi>, fn: (base: string) => Promise<void>): Promise<void> {
+  const srv = createMonitorHttpServer({
+    password: PASSWORD,
+    health: () => ({ ...healthStub }),
+    tasks: {
+      create: opts.create ?? (async () => ({ status: 201, body: stubInfo })),
+      list: opts.list ?? ((sid) => ({ status: 200, body: sid ? [stubInfo] : [stubInfo, stubInfo] })),
+      get: opts.get ?? ((id) => (id === "mon_stub0001" ? { status: 200, body: stubInfo } : { status: 404, body: { error: "nope", code: "TASK_NOT_FOUND" } })),
+    },
+  });
+  await new Promise<void>((resolve) => srv.listen(0, "127.0.0.1", resolve));
+  try {
+    await fn(`http://127.0.0.1:${(srv.address() as AddressInfo).port}`);
+  } finally {
+    srv.close();
+    srv.closeAllConnections();
+  }
+}
+
+test("POST /api/tasks：create 出参透传（201 + body 原样）", async () => {
+  await withTaskServer({}, async (base) => {
+    const res = await fetch(base + "/api/tasks", {
+      method: "POST",
+      headers: { authorization: auth(PASSWORD), "content-type": "application/json" },
+      body: JSON.stringify({ command: "echo x", opencode_port: 1, session_id: "ses_stub" }),
+    });
+    assert.equal(res.status, 201);
+    assert.equal(((await res.json()) as PublicInfo).id, "mon_stub0001");
+  });
+});
+
+test("POST /api/tasks：业务拒绝状态透传（400 原样映射）", async () => {
+  await withTaskServer(
+    {
+      create: async () => ({ status: 400, body: { error: "bad", code: "PORT_NOT_IN_REGISTRY" } }),
+    },
+    async (base) => {
+      const res = await fetch(base + "/api/tasks", {
+        method: "POST",
+        headers: { authorization: auth(PASSWORD) },
+        body: JSON.stringify({}),
+      });
+      assert.equal(res.status, 400);
+      assert.equal(((await res.json()) as ApiError).code, "PORT_NOT_IN_REGISTRY");
+    },
+  );
+});
+
+test("POST /api/tasks：坏 JSON → 400 INVALID_JSON；空 body 同样 400", async () => {
+  await withTaskServer({}, async (base) => {
+    const res = await fetch(base + "/api/tasks", {
+      method: "POST",
+      headers: { authorization: auth(PASSWORD) },
+      body: "not-json{",
+    });
+    assert.equal(res.status, 400);
+    assert.equal(((await res.json()) as ApiError).code, "INVALID_JSON");
+    const res2 = await fetch(base + "/api/tasks", {
+      method: "POST",
+      headers: { authorization: auth(PASSWORD) },
+    });
+    assert.equal(res2.status, 400);
+  });
+});
+
+test("POST /api/tasks：body 超 256KB → 413", async () => {
+  await withTaskServer({}, async (base) => {
+    const res = await fetch(base + "/api/tasks", {
+      method: "POST",
+      headers: { authorization: auth(PASSWORD) },
+      body: "x".repeat(300_000),
+    });
+    assert.equal(res.status, 413);
+    assert.equal(((await res.json()) as ApiError).code, "BODY_TOO_LARGE");
+  });
+});
+
+test("GET /api/tasks：列表透传 + ?session_id= 传参", async () => {
+  await withTaskServer({}, async (base) => {
+    const all = await fetch(base + "/api/tasks", { headers: { authorization: auth(PASSWORD) } });
+    assert.equal(all.status, 200);
+    assert.equal(((await all.json()) as PublicInfo[]).length, 2);
+    const one = await fetch(base + "/api/tasks?session_id=ses_stub", { headers: { authorization: auth(PASSWORD) } });
+    assert.equal(((await one.json()) as PublicInfo[]).length, 1);
+  });
+});
+
+test("GET /api/tasks/:id：命中 200；未知 404 透传；非法 id 形状直接 404", async () => {
+  await withTaskServer({}, async (base) => {
+    const ok = await fetch(base + "/api/tasks/mon_stub0001", { headers: { authorization: auth(PASSWORD) } });
+    assert.equal(ok.status, 200);
+    const missing = await fetch(base + "/api/tasks/mon_nope9999", { headers: { authorization: auth(PASSWORD) } });
+    assert.equal(missing.status, 404);
+    const malformed = await fetch(base + "/api/tasks/../../etc", { headers: { authorization: auth(PASSWORD) } });
+    assert.equal(malformed.status, 404);
+  });
+});
+
+test("DELETE /api/tasks → 405（stop/DELETE 留阶段 F）", async () => {
+  await withTaskServer({}, async (base) => {
+    const res = await fetch(base + "/api/tasks/mon_stub0001", {
+      method: "DELETE",
+      headers: { authorization: auth(PASSWORD) },
+    });
+    assert.equal(res.status, 405);
+  });
+});
+
+test("未注入 tasks（阶段 B 形态）：任务路由仍 404 NO_ROUTE（向后兼容）", async () => {
+  const srv = createMonitorHttpServer({ password: PASSWORD, health: () => ({ ...healthStub }) });
+  await new Promise<void>((resolve) => srv.listen(0, "127.0.0.1", resolve));
+  const res = await fetch(`http://127.0.0.1:${(srv.address() as AddressInfo).port}/api/tasks`, {
+    headers: { authorization: auth(PASSWORD) },
+  });
+  assert.equal(res.status, 404);
+  assert.equal(((await res.json()) as ApiError).code, "NO_ROUTE");
   srv.close();
   srv.closeAllConnections();
 });

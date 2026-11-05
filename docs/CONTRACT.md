@@ -16,6 +16,7 @@
 | 缺 `text` 字段 | 400 `InvalidRequestError` `"Missing key\n at [\"text\"]"`，`kind:"Payload"` | — |
 | `text:""`（空串） | **200（合法）** | schema 只要求字段存在；v2 信封恒非空，无影响 |
 | `delivery:"bogus"` | 400 `InvalidRequestError` `"Expected Session.Inbox.Delivery"` | 枚举校验在服务端 |
+| **自定义 `id` 非 `msg_` 前缀**（阶段 D 真机实测） | **400 `InvalidRequestError`**（spec：`Session.Message.ID` pattern `^msg_`） | **幂等 id 必须 `msg_` 前缀**（v2 用 `msg_omt_<taskId>_<seq>`）；probe 当时用 `msg_omt_verify_*` 恰好合规，`omt-` 裸前缀被拒 |
 | 不存在的 session | 404 `{"_tag":"SessionNotFoundError","sessionID":...}` | 降级链判据：`status===404` 或 `_tag==="SessionNotFoundError"` |
 | 无鉴权 | 401 `UnauthorizedError` | 凭证失效的判据 |
 | 409 Conflict | **正常路径未观测到** | 按可重试错误处理（同 5xx 退避重试） |
@@ -38,7 +39,11 @@
 
 ## 配套端点
 
-- `GET /api/session/{sessionID}/inbox` → 200 `{data: Synthetic[]}`（持久收件箱；resume:false 的消息可见）
+- `GET /api/session/{sessionID}/inbox` → 200 `{data: Synthetic[]}`（持久收件箱；**resume:false 的消息可见**；
+  不带 resume（默认调度执行）的消息不留在 inbox——真机实测 inbox 为空，消息转入会话）
+- `GET /api/session/{sessionID}/message` → 200 `{data: Message[]}`：**已调度执行的 synthetic 输入出现在此**，
+  形状 `{ id: "<所传幂等id>", type: "synthetic", text: "<正文顶层字段>" }`——生产投递（不带 resume）的
+  验收观察窗口；同时会实际触发 agent turn（assistant 消息），即 v2 的"唤醒 agent"语义本身
 - `POST /api/session`（`session.create`，body 可含 `title`）→ 200；`DELETE /api/session/{sessionID}`（`session.remove`）→ 204 —— probe 的隔离会话搭建/清理通道
 - `GET /api/session/{sessionID}` → session 存活校验（任务创建 fail fast）
 
