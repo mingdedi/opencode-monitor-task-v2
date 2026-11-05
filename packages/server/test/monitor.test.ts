@@ -487,7 +487,8 @@ test("窗口到期 flush：行到达后进程仍活，窗口到期由 tick 驱�
 // ---------------------------------------------------------------------------
 // createTask fail fast
 
-test("fail fast：幻觉端口 → 400 PORT_NOT_IN_REGISTRY，无任务落盘", async () => {  const r = rig();
+test("fail fast：幻觉端口 → 400 PORT_NOT_IN_REGISTRY，无任务落盘", async () => {
+  const r = rig();
   const out = await create(r, validBody({ opencode_port: 65534 }));
   assert.equal(out.ok, false);
   if (out.ok) return;

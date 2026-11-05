@@ -152,9 +152,11 @@ async function scenario1_storm(client: MonitorClient): Promise<void> {
     });
     const final = await waitForTerminal(client, t.id);
     check("①风暴: 任务终态 completed", final?.state === "completed", `state=${final?.state}`);
-    check("①风暴: events_sent=1（30 行合 1 条）", final?.events_sent === 1, `sent=${final?.events_dropped}`);
-    check("①风暴: events_dropped=0", final?.events_dropped === 0);
-    check("①风暴: lines 30 matched / 30 scanned", final?.lines_matched === 30 && final?.lines_scanned === 30);
+    // events_sent 送达回调计数：终态可见 ≠ 投递完成（同 ③④ 裁定，轮询至稳定值）
+    const settled = await awaitTaskField(client, t.id, (t2) => t2.events_sent === 1 && t2.events_dropped === 0);
+    check("①风暴: events_sent=1（30 行合 1 条）", settled?.events_sent === 1, `sent=${settled?.events_sent}`);
+    check("①风暴: events_dropped=0", settled?.events_dropped === 0, `dropped=${settled?.events_dropped}`);
+    check("①风暴: lines 30 matched / 30 scanned", settled?.lines_matched === 30 && settled?.lines_scanned === 30);
 
     const envs = await sessionEnvelopes(sid);
     const wake = await awaitEnvelope(sid, (e) => e.includes("[30 lines coalesced]"));
