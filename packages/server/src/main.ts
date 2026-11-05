@@ -174,6 +174,52 @@ export async function probeExisting(svc: ServiceFile): Promise<{ ok: boolean; ve
 }
 
 // ---------------------------------------------------------------------------
+// 启动期恢复时序与 DELETE 裁决（Review 修复，导出供单测）
+
+/** 首轮 pending 重投完成后才启动 sweeper。时序契约：sweeper 的启动必扫不得先于
+ *  重投——长停机（> taskTtlMs）重启时，终态任务目录里的 pending 结局通知必须先
+ *  得到至少一次重投机会，否则必扫先按 TTL 删目录（连 pending.json），通知一次
+ *  未试即永久丢失（不哑跑哲学）。重投异常同样放行清理（双围栏：调用方自带
+ *  .catch 留痕，此处兜底逃逸——void 调用不许变成 unhandled rejection）。 */
+export async function recoveryThenSweep(
+  runPendingRetry: () => Promise<unknown>,
+  startSweep: () => void,
+): Promise<void> {
+  try {
+    await runPendingRetry();
+  } catch {
+    // 逃逸异常吞掉：TTL 清理不可被阻塞（调用方已留痕）
+  } finally {
+    startSweep();
+  }
+}
+
+/** DELETE /api/tasks/:id 裁决（纯函数）。Review 修复（合并视图一致性）：GET 列表/
+ *  详情能看到 store 侧任务（registry 200 驱逐后目录仍在 TTL 窗口内），DELETE 同样
+ *  应能处置——旧实现 registry-only 查询对同一任务 GET 200 / DELETE 404 自相矛盾。
+ *  未在册的活态目录（reattach 未跑的崩溃残留）同样 409：无人看护，删目录会留下
+ *  无主进程继续跑。
+ *  live = registry 在册视图；storeInfo = store 侧补齐视图（未在册时现读 meta） */
+export function removalOutcome(
+  id: string,
+  live: PublicInfo | null,
+  storeInfo: PublicInfo | null,
+): TaskEndpointOutcome {
+  const info = live ?? storeInfo;
+  if (info === null) {
+    return { status: 404, body: { error: `task ${id} not found`, code: "TASK_NOT_FOUND" } };
+  }
+  if (isAliveState(info.state)) {
+    const hint = live === null ? " (not claimed by this server — reattach pending? probe GET /api/health)" : "";
+    return {
+      status: 409,
+      body: { error: `task ${id} is ${info.state}${hint}; stop it first`, code: "TASK_NOT_TERMINAL" },
+    };
+  }
+  return { status: 204, body: null };
+}
+
+// ---------------------------------------------------------------------------
 // 装配
 
 export interface MainDeps {
@@ -429,19 +475,17 @@ export async function main(
     },
     remove: (id: string): TaskEndpointOutcome => {
       const t = tasks.get(id);
-      if (!t) return notFound(id);
-      const info = t.toPublicInfo();
-      if (isAliveState(info.state)) {
-        // SERVER-PLAN §三-4：运行中 DELETE → 409，提示先 stop（仅终态可 DELETE）
-        return { status: 409, body: { error: `task ${id} is ${info.state}; stop it first`, code: "TASK_NOT_TERMINAL" } };
-      }
+      // registry 在册用活视图；未在册回落 store 侧补齐视图（Review 修复：与 GET 的
+      // 合并视图同源——驱逐后 TTL 窗口内的终态任务同样可 DELETE，见 removalOutcome）
+      const plan = removalOutcome(id, t !== undefined ? t.toPublicInfo() : null, t === undefined ? storedInfo(id) : null);
+      if (plan.status !== 204) return plan;
       try {
         rmSync(taskDir(paths, id), { recursive: true, force: true });
       } catch (err) {
         return { status: 500, body: { error: `cannot remove task dir: ${String(err)}`, code: "REMOVE_FAILED" } };
       }
       tasks.remove(id);
-      return { status: 204, body: null };
+      return plan;
     },
     readLog: (id: string, tail: string | undefined): TaskEndpointOutcome => {
       const mon = asMonitor(id);
@@ -515,8 +559,8 @@ export async function main(
   // .catch 围栏与 sweeper run() 对齐——生产 deliverNotification 已验证不抛
   // （opencode.ts 全链 catch 为返回值），但 uncaughtException → exit(1) 姿态下
   // 未来任何逃逸异常都不该经此拖垮服务端
-  const pendingTimer = setInterval(() => {
-    void retryPendingTasks({ ...monitorBase, registry: tasks })
+  const runPendingRetry = (): Promise<void> =>
+    retryPendingTasks({ ...monitorBase, registry: tasks })
       .then((r) => {
         if (r.delivered + r.dropped + r.retained > 0) {
           log(`pending retry: ${r.delivered} delivered, ${r.dropped} dropped, ${r.retained} retained`);
@@ -525,11 +569,15 @@ export async function main(
       .catch((err: unknown) => {
         log(`pending retry error: ${String(err).slice(0, 120)}`);
       });
-  }, LIMITS.pendingRetryMs);
+  const pendingTimer = setInterval(() => void runPendingRetry(), LIMITS.pendingRetryMs);
   pendingTimer.unref?.();
-  // sweeper：TTL 清理（启动必扫 + 每 10min，PLAN §2.10）
-  const sweeperTimer = startSweeper(paths, tasks, log);
-  sweeperTimer.unref?.();
+  // sweeper：TTL 清理（启动必扫 + 每 10min，PLAN §2.10）。启动时序（Review 修复）：
+  // 首轮 pending 重投完成后才做启动必扫（recoveryThenSweep）——顺序颠倒会在长停机
+  // 重启场景先删掉带 pending.json 的 TTL 过期目录，结局通知一次未试即永久丢失；
+  // 重投全程有界（逐条 ≤4 次尝试），延迟首扫无害（被清的都是早已过期的目录）
+  void recoveryThenSweep(runPendingRetry, () => {
+    startSweeper(paths, tasks, log).unref?.();
+  });
 
   // 信号处理：SIGTERM/SIGINT 优雅退出；默认不杀任务——任务自成进程组（PLAN §2.1 退出语义）。
   // --shutdown-all（PLAN §2.1"显式参数才击杀全部任务进程组"）：先 requestStop 全部活任务再退。

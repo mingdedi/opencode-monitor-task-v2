@@ -303,6 +303,20 @@ test("orphaned：session 死亡（404）→ 停止通知 + SIGTERM 温和停止�
   assert.equal(r.registry.aliveCount(), 0);
 });
 
+test("orphan 计数留痕（Review 修复回归）：触发 orphaned 的那条通知计入 events_dropped", async () => {
+  const r = rig({ syntheticStatus: 404 });
+  const out = await create(r, validBody({ command: "echo orphan-cnt; sleep 30", coalesce_ms: 0 }));
+  assert.equal(out.ok, true);
+  if (!out.ok) return;
+  const id = out.info.id;
+  assert.ok(await waitFor(() => info(r, id).state === "orphaned"), "should orphan");
+  const final = info(r, id);
+  assert.equal(final.events_sent, 0);
+  // 旧实现：该 wake 既不计 sent 也不计 dropped——账目凭空消失（0）；新：真正放弃计 1
+  assert.equal(final.events_dropped, 1);
+  assert.equal(syntheticCalls(r).length, 1, "exactly one abandoned wake");
+});
+
 test("投递耗尽不阻断生命周期：恒 500 → wake/lifecycle 都落 pending（G 语义），任务照常 completed", async () => {
   const r = rig({ syntheticStatus: 500 });
   const out = await create(r, validBody({ command: "echo dead-letter; sleep 0.2" }));
@@ -883,6 +897,27 @@ test("收尾窗口守卫（Review 修复回归）：finalizing 中 keepalive/upd
   await stopP;
   assert.equal(info(r, id).state, "stopped", "stop 照常完成，状态未被窗口内操作翻转");
   assert.equal(info(r, id).max_events, 50, "窗口内的 update 未生效");
+});
+
+test("stop 收尾窗口竞态（Review 修复回归）：finalizing 中并发 stop 等待在途收尾 → 终态快照", async () => {
+  const r = rig();
+  const out = await create(r, validBody({ command: "echo ready-race; sleep 30", coalesce_ms: 0 }));
+  assert.equal(out.ok, true);
+  if (!out.ok) return;
+  const id = out.info.id;
+  const mon = r.registry.get(id) as Monitor;
+  assert.ok(await waitFor(() => info(r, id).events_sent === 1), "bash fully up");
+  // p1 同步段置 finalizing 后停在 killTree 的 200ms 真实窗口；p2 落入该窗口——
+  // 旧实现经 stopAndFinalize 守卫早退，返回 state=running 的"还活着"快照，
+  // 违背"await 完成后返回终态快照"的端点契约
+  const p1 = mon.requestStop();
+  const p2 = mon.requestStop();
+  const [r1, r2] = await Promise.all([p1, p2]);
+  assert.equal(r1.ok, true);
+  assert.equal(r2.ok, true);
+  if (r1.ok) assert.equal(r1.info.state, "stopped");
+  if (r2.ok) assert.equal(r2.info.state, "stopped", "并发 stop 必须等到终态再回快照");
+  assert.equal(info(r, id).state, "stopped");
 });
 
 test("readLogTail 有界读（Review 修复回归）：巨型单行日志只读尾块，不整读", async () => {

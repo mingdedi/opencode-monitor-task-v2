@@ -5,7 +5,7 @@ import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, mkdirSync
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test, before, after } from "node:test";
-import { main, readServiceFile, SERVER_VERSION, writeServiceFile } from "../src/main.ts";import { lockFilePath, serviceFilePath, stateDir, type PathEnv, type ServiceFile } from "@omt/shared";
+import { main, readServiceFile, recoveryThenSweep, removalOutcome, SERVER_VERSION, writeServiceFile } from "../src/main.ts";import { lockFilePath, serviceFilePath, stateDir, type PathEnv, type PublicInfo, type ServiceFile } from "@omt/shared";
 
 let root: string;
 let env: NodeJS.ProcessEnv;
@@ -125,4 +125,86 @@ test("readServiceFile：不存在 null；坏 JSON 抛错（发现方清理路径
   mkdirSync(stateDir(paths), { recursive: true });
   writeFileSync(serviceFilePath(paths), "not json");
   assert.throws(() => readServiceFile(paths));
+});
+
+// ---------------------------------------------------------------------------
+// 启动期恢复时序与 DELETE 裁决（Review 修复回归）
+
+test("recoveryThenSweep：sweeper 启动必扫须待首轮 pending 重投完成（含失败放行）", async () => {
+  const events: string[] = [];
+  let release!: () => void;
+  const gate = new Promise<void>((res) => (release = res));
+  const p = recoveryThenSweep(
+    async () => {
+      events.push("retry-start");
+      await gate;
+      events.push("retry-end");
+    },
+    () => events.push("sweep-start"),
+  );
+  await new Promise<void>((r) => setTimeout(r, 20));
+  // 旧时序（sweeper 启动即必扫、重投要等 60s 周期）：此刻 sweep-start 已出现——
+  // 长停机重启场景下它会先按 TTL 删掉带 pending.json 的目录，结局通知一次未试即丢失
+  assert.deepEqual(events, ["retry-start"], `sweeper must not start before pending retry settles: ${events}`);
+  release();
+  await p;
+  assert.deepEqual(events, ["retry-start", "retry-end", "sweep-start"]);
+  // 重投逃逸异常同样放行清理，且返回的 promise 不得 reject（void 调用纪律）
+  const events2: string[] = [];
+  await recoveryThenSweep(
+    async () => {
+      throw new Error("boom");
+    },
+    () => events2.push("sweep-start"),
+  );
+  assert.deepEqual(events2, ["sweep-start"]);
+});
+
+function pubInfo(over: Partial<PublicInfo>): PublicInfo {
+  return {
+    id: "mon_x",
+    description: null,
+    state: "running",
+    session_id: "ses_x",
+    opencode_port: 1,
+    directory: "/tmp",
+    command: "c",
+    pattern: null,
+    wake_mode: "all",
+    delivery: "queue",
+    coalesce_ms: 0,
+    max_events: 1,
+    idle_timeout_ms: 1000,
+    idle_deadline: null,
+    grace_deadline: null,
+    started_at: 0,
+    pid: null,
+    lines_scanned: 0,
+    lines_matched: 0,
+    events_sent: 0,
+    events_dropped: 0,
+    exit_info: null,
+    log_bytes: 0,
+    last_offset: 0,
+    updated_at: 0,
+    ...over,
+  };
+}
+
+test("removalOutcome：store 侧终态可删（与 GET 合并视图一致）、未在册活态 409、无视图 404", () => {
+  // registry 在册终态 → 204（原语义保持）
+  assert.equal(removalOutcome("mon_x", pubInfo({ state: "completed" }), null).status, 204);
+  // registry 在册活态 → 409 提示先 stop（原语义保持）
+  const alive = removalOutcome("mon_x", pubInfo({ state: "running" }), null);
+  assert.equal(alive.status, 409);
+  assert.equal((alive.body as { code?: string }).code, "TASK_NOT_TERMINAL");
+  // store 侧终态（registry 已驱逐、目录在 TTL 窗口内）→ 204——旧实现 registry-only
+  // 查询返回 404，与同一任务 GET 200 的合并视图自相矛盾
+  assert.equal(removalOutcome("mon_x", null, pubInfo({ state: "stopped" })).status, 204);
+  // store 侧活态（reattach 未跑的崩溃残留）→ 409：无人看护，删目录会留无主进程继续跑
+  const residual = removalOutcome("mon_x", null, pubInfo({ state: "running" }));
+  assert.equal(residual.status, 409);
+  assert.ok(String((residual.body as { error?: string }).error).includes("not claimed"), "hint for unclaimed dir");
+  // 两侧都无 → 404
+  assert.equal(removalOutcome("mon_x", null, null).status, 404);
 });

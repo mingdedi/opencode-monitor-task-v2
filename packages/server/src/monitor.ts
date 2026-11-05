@@ -601,6 +601,10 @@ export class Monitor {
         this.safeWriteMeta();
         return;
       }
+      // 本条通知真正放弃（死 session 不重试、pending 无处可去）——计 dropped 留痕
+      // （Review 修复：旧实现该条既不计 sent 也不计 dropped，账目凭空消失；
+      // orphan 收尾落盘 meta 时一并持久化）
+      this.meta.events_dropped += 1;
       // §2.8.2：死 session 不无限重试 → orphaned；§三-1：SIGTERM 温和停止，看护撤除
       void this.orphan(outcome.detail);
       return;
@@ -768,13 +772,35 @@ export class Monitor {
 
   /** POST /api/tasks/:id/stop：running/idle → 温和停止（await 完成后返回终态快照，
    *  响应准确反映结局——管理操作低频，killTree+exit 宽限的亚秒等待可接受）；
-   *  终态 → 幂等 200 返回当前快照（v1 语义：already stopped 亦是成功） */
+   *  终态 → 幂等 200 返回当前快照（v1 语义：already stopped 亦是成功）。
+   *  收尾窗口竞态（Review 修复）：tick 驱动的自然收尾/idle 到期/max_events 即停先行
+   *  进入 finalizing 时，旧实现经 stopAndFinalize 守卫早退、返回"还活着"的快照——
+   *  违背终态快照契约；改为等待在途收尾落终态后返回真结局（有界，见 waitForTerminalState） */
   async requestStop(): Promise<ManageOutcome> {
     if (!isAliveState(this.meta.state)) {
       return { ok: true, info: this.toPublicInfo() };
     }
-    await this.stopAndFinalize("reason: stopped by request", `task ${this.id} stopped: by request`);
+    if (this.finalizing) {
+      await this.waitForTerminalState();
+    } else {
+      await this.stopAndFinalize("reason: stopped by request", `task ${this.id} stopped: by request`);
+    }
     return { ok: true, info: this.toPublicInfo() };
+  }
+
+  /** 等待在途收尾落终态：三条收尾路径（finalize/stopAndFinalize/orphan）终态不可逆
+   *  且全程有界（killTree ≤200ms + exit 宽限 ≤300ms，无网络重试），轮询必会终止。
+   *  刻意用真定时器 25ms 轮询而非 deps.sleep——注入的 sleep 可能是即时微任务，
+   *  热循环会饿死 macrotask，在途收尾的 killTree 定时器反而无法推进。预算 2s
+   *  （≈4 倍余量）超时按当前快照返回并留痕（理论不可达——防御性兜底） */
+  private async waitForTerminalState(): Promise<void> {
+    const deadline = Date.now() + 2000;
+    while (this.finalizing && isAliveState(this.meta.state) && Date.now() < deadline) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 25));
+    }
+    if (this.finalizing && isAliveState(this.meta.state)) {
+      this.safeLog(`task ${this.id} stop: in-flight finalize did not settle within budget — returning live snapshot`);
+    }
   }
 
   /** POST /api/tasks/:id/keepalive：idle → 复活 running + 重置静默计时（v1
