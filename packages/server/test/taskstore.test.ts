@@ -97,6 +97,7 @@ test("initTaskDir: 目录 0700；writeMeta/readMeta 全字段 roundtrip", () => 
     events_dropped: 1,
     state: "running",
     exit_info: null,
+    grace_deadline: null,
     claimed_by: 4242,
     updated_at: 1699000001000,
   };

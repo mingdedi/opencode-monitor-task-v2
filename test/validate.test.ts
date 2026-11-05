@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { checkCommand, validateCreateInput, versionCompatible } from "../packages/shared/src/validate.ts";
+import {
+  checkCommand,
+  validateCreateInput,
+  validatePatchInput,
+  versionCompatible,
+} from "../packages/shared/src/validate.ts";
 
 // ---------------------------------------------------------------------------
 // 发现流程版本兼容判定（SERVER-PLAN §三-3：major.minor 相等即复用）
@@ -221,4 +226,29 @@ test("relative directory rejected", () => {
 test("description length capped at 80", () => {
   const r = validateCreateInput({ ...valid, description: "x".repeat(81) });
   assert.equal(r.ok, false);
+});
+
+// ---------------------------------------------------------------------------
+// PATCH 校验（阶段 F：仅 max_events 可调）
+
+test("validatePatchInput: 合法 max_events 通过", () => {
+  assert.deepEqual(validatePatchInput({ max_events: 10 }), { ok: true, violations: [], value: { max_events: 10 } });
+  assert.equal(validatePatchInput({ max_events: 1 }).ok, true);
+  assert.equal(validatePatchInput({ max_events: 10000 }).ok, true);
+});
+
+test("validatePatchInput: 缺 max_events / 越界 / 非整数 / 非对象 → 拒绝", () => {
+  assert.equal(validatePatchInput({}).ok, false);
+  assert.equal(validatePatchInput({ max_events: 0 }).ok, false);
+  assert.equal(validatePatchInput({ max_events: 10001 }).ok, false);
+  assert.equal(validatePatchInput({ max_events: 5.5 }).ok, false);
+  assert.equal(validatePatchInput({ max_events: "10" }).ok, false);
+  assert.equal(validatePatchInput(null).ok, false);
+  assert.equal(validatePatchInput("x").ok, false);
+});
+
+test("validatePatchInput: 未知字段拒绝（只有 max_events 可调，防呆）", () => {
+  const r = validatePatchInput({ max_events: 10, idle_timeout_ms: 1000 });
+  assert.equal(r.ok, false);
+  assert.ok(r.violations.some((v) => v.field === "idle_timeout_ms" && v.message.includes("only max_events")));
 });

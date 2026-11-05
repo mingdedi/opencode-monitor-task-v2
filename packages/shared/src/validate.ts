@@ -315,3 +315,33 @@ export function validateCreateInput(input: unknown): CreateValidation {
   // 显式 wake_mode="all" + pattern：只统计不过滤（PLAN §3.3）
   return { ok: true, violations: [], value };
 }
+
+// ---------------------------------------------------------------------------
+// PATCH /api/tasks/:id 校验（阶段 F；当前仅 max_events 可调，PLAN §2.2/§3.4）
+
+/** 与 CreateValidation 同款 discriminated union（§6.2 纪律） */
+export type PatchValidation =
+  | { ok: true; violations: []; value: { max_events: number } }
+  | { ok: false; violations: ParamViolation[] };
+
+export function validatePatchInput(input: unknown): PatchValidation {
+  const v: ParamViolation[] = [];
+  if (typeof input !== "object" || input === null) {
+    return { ok: false, violations: [{ field: "body", message: "JSON object required" }] };
+  }
+  const raw = input as Record<string, unknown>;
+  // 只支持 max_events：其余字段显式拒绝（防呆——传了说明调用方搞错了 PATCH 语义）
+  for (const key of Object.keys(raw)) {
+    if (key !== "max_events") v.push({ field: key, message: "only max_events is patchable" });
+  }
+  if (
+    raw["max_events"] === undefined ||
+    !isInt(raw["max_events"]) ||
+    raw["max_events"] < 1 ||
+    raw["max_events"] > LIMITS.maxMaxEvents
+  ) {
+    v.push({ field: "max_events", message: `integer 1-${LIMITS.maxMaxEvents} required` });
+  }
+  if (v.length > 0) return { ok: false, violations: v };
+  return { ok: true, violations: [], value: { max_events: raw["max_events"] as number } };
+}

@@ -1,10 +1,10 @@
-// 任务注册表（PLAN §2.4/§2.10 / §6.1；SERVER-PLAN 阶段 D 薄版）
+// 任务注册表（PLAN §2.4/§2.10 / §6.1；阶段 D 薄版 + 阶段 F 上限/驱逐）
 // 纯簿记与聚合（PLAN §6.2 模块纪律：严禁 spawn/流处理/投递细节）：
 //   阶段 D：内存 Map + PublicInfo 聚合视图 + alive 计数（health 数据源）
-//   阶段 F：每 session ≤16 存活上限 + 终态 200 驱逐最旧
+//   阶段 F：每 session ≤16 存活上限（createTask fail fast 查询）+ 终态 200 驱逐最旧
 //   阶段 G：TaskStore 合并视图（parked 无 Monitor 实例，从 store 出）
 
-import type { PublicInfo, TaskState } from "@omt/shared";
+import { LIMITS, type PublicInfo, type TaskState } from "@omt/shared";
 
 /** registry 只认这个最小视图——Monitor 满足之；测试可轻量 stub */
 export interface TaskView {
@@ -23,10 +23,15 @@ export class TaskRegistry {
 
   add(t: TaskView): void {
     this.tasks.set(t.id, t);
+    this.evictTerminalIfNeeded();
   }
 
   get(id: string): TaskView | undefined {
     return this.tasks.get(id);
+  }
+
+  remove(id: string): boolean {
+    return this.tasks.delete(id);
   }
 
   get size(): number {
@@ -41,6 +46,16 @@ export class TaskRegistry {
     return n;
   }
 
+  /** 每 session 存活任务数（PLAN §2.4 并发上限 16 的判据——服务端内存态，R5-2 根治） */
+  aliveCountForSession(sessionId: string): number {
+    let n = 0;
+    for (const t of this.tasks.values()) {
+      const info = t.toPublicInfo();
+      if (info.session_id === sessionId && isAliveState(info.state)) n++;
+    }
+    return n;
+  }
+
   /** 聚合视图（TUI/工具列表数据源）；sessionId 过滤（PLAN §2.2 ?session_id=） */
   listInfos(sessionId?: string): PublicInfo[] {
     const out: PublicInfo[] = [];
@@ -49,5 +64,20 @@ export class TaskRegistry {
       if (sessionId === undefined || info.session_id === sessionId) out.push(info);
     }
     return out.sort((a, b) => a.started_at - b.started_at);
+  }
+
+  /** 终态驱逐（PLAN §2.10：上限 200，驱逐最旧——registry 内存簿记上限，非硬实时；
+   *  惰性触发于 add：终态由活任务死亡产生，短暂超限无害，下次创建即清扫。
+   *  只动内存——TaskStore 目录清理由 sweeper TTL 负责（G 阶段） */
+  private evictTerminalIfNeeded(): void {
+    const terminal: Array<{ id: string; startedAt: number }> = [];
+    for (const t of this.tasks.values()) {
+      const info = t.toPublicInfo();
+      if (!isAliveState(info.state)) terminal.push({ id: t.id, startedAt: info.started_at });
+    }
+    const toEvict = terminal.length - LIMITS.registryMaxTerminal;
+    if (toEvict <= 0) return;
+    terminal.sort((a, b) => a.startedAt - b.startedAt);
+    for (let i = 0; i < toEvict; i++) this.tasks.delete(terminal[i]!.id);
   }
 }

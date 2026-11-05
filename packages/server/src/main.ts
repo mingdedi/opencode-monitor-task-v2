@@ -1,10 +1,11 @@
-// 服务端入口（PLAN §2.1 / §6.1；SERVER-PLAN 阶段 B 最小版 + 阶段 C 注册表接线 + 阶段 D 任务闭环）
+// 服务端入口（PLAN §2.1 / §6.1；SERVER-PLAN 阶段 B 最小版 + 阶段 C 注册表接线 + 阶段 D 任务闭环 + 阶段 F 管理端点）
 // 职责：platform gate → 单实例锁（O_EXCL，内容含 pid）→ 127.0.0.1 随机端口监听
 //       → service.json 600 原子写 → 信号处理（默认不杀任务，PLAN §2.1 退出语义）
 //       → 日志落 state 目录（不记命令全文，DEBUG=1 才详细，PLAN §4）
 //       → opencode 实例注册表（--opencode-state 多条目，§2.8.1；health 实例表实测）
-//       → 任务注册表 + 任务端点装配（阶段 D：POST /api/tasks + GET 列表/详情）
-// 仍不含：管理端点（F）、reattach（G）、/api/shutdown（G）。
+//       → 任务注册表 + 任务端点装配（阶段 D：POST /api/tasks + GET 列表/详情；
+//         阶段 F：stop/keepalive/PATCH/DELETE/log + session 上限/registry 驱逐）
+// 仍不含：reattach（G）、/api/shutdown（G）。
 //
 // 创建竞态语义（PLAN §2.1-4）：先原子抢锁 → in-use 后到者核对/等待已有 service.json 的 health，
 // 健康则打印后退出码 0（后到者自然退出，service.json 由最终存活者持有）；死持锁者可抢。
@@ -17,6 +18,7 @@ import {
   linkSync,
   readFileSync,
   realpathSync,
+  rmSync,
   statSync,
   unlinkSync,
   writeFileSync,
@@ -25,10 +27,13 @@ import { fileURLToPath } from "node:url";
 import type { AddressInfo } from "node:net";
 import {
   envFromProcess,
+  LIMITS,
   lockFilePath,
   serverLogPath,
   serviceFilePath,
   stateDir,
+  taskDir,
+  validatePatchInput,
   versionCompatible,
   type HealthInfo,
   type PathEnv,
@@ -36,8 +41,8 @@ import {
 } from "@omt/shared";
 import { createMonitorHttpServer, type TaskEndpointOutcome } from "./http.ts";
 import { buildRegistry, parseOpencodeStateArgs, probeInstances, type OpencodeRegistry } from "./opencode.ts";
-import { createTask } from "./monitor.ts";
-import { TaskRegistry } from "./registry.ts";
+import { createTask, Monitor } from "./monitor.ts";
+import { TaskRegistry, isAliveState } from "./registry.ts";
 import { ensurePrivateDir, writeFileAtomic } from "./taskstore.ts";
 
 export const SERVER_VERSION: string = (
@@ -326,7 +331,17 @@ export async function main(
     };
   };
 
-  // 任务端点装配（阶段 D：创建 + 列表 + 详情；F 阶段补 stop/keepalive/PATCH/DELETE/log）
+  // 任务端点装配（阶段 D：创建 + 列表 + 详情；阶段 F：+ stop/keepalive/PATCH/DELETE/log；
+  // 阶段 G：+ /api/shutdown）。管理端点只对在册 Monitor 实例有效（G 阶段 parked 从
+  // store 出、无 Monitor 实例 → 404）
+  const asMonitor = (id: string): Monitor | null => {
+    const t = tasks.get(id);
+    return t instanceof Monitor ? t : null;
+  };
+  const notFound = (id: string): TaskEndpointOutcome => ({
+    status: 404,
+    body: { error: `task ${id} not found`, code: "TASK_NOT_FOUND" },
+  });
   const tasksApi = {
     create: async (body: unknown): Promise<TaskEndpointOutcome> => {
       const r = await createTask(
@@ -344,6 +359,59 @@ export async function main(
       return t
         ? { status: 200, body: t.toPublicInfo() }
         : { status: 404, body: { error: `task ${id} not found`, code: "TASK_NOT_FOUND" } };
+    },
+    patch: async (id: string, body: unknown): Promise<TaskEndpointOutcome> => {
+      const v = validatePatchInput(body);
+      if (!v.ok) {
+        return { status: 400, body: { error: "invalid patch input", code: "INVALID_INPUT", detail: v.violations } };
+      }
+      const mon = asMonitor(id);
+      if (mon === null) return notFound(id);
+      const r = await mon.updateMaxEvents(v.value.max_events);
+      return r.ok ? { status: 200, body: r.info } : { status: r.status, body: r.error };
+    },
+    stop: async (id: string): Promise<TaskEndpointOutcome> => {
+      const mon = asMonitor(id);
+      if (mon === null) return notFound(id);
+      const r = await mon.requestStop();
+      return r.ok ? { status: 200, body: r.info } : { status: r.status, body: r.error };
+    },
+    keepalive: (id: string): TaskEndpointOutcome => {
+      const mon = asMonitor(id);
+      if (mon === null) return notFound(id);
+      const r = mon.keepalive();
+      return r.ok ? { status: 200, body: r.info } : { status: r.status, body: r.error };
+    },
+    remove: (id: string): TaskEndpointOutcome => {
+      const t = tasks.get(id);
+      if (!t) return notFound(id);
+      const info = t.toPublicInfo();
+      if (isAliveState(info.state)) {
+        // SERVER-PLAN §三-4：运行中 DELETE → 409，提示先 stop（仅终态可 DELETE）
+        return { status: 409, body: { error: `task ${id} is ${info.state}; stop it first`, code: "TASK_NOT_TERMINAL" } };
+      }
+      try {
+        rmSync(taskDir(paths, id), { recursive: true, force: true });
+      } catch (err) {
+        return { status: 500, body: { error: `cannot remove task dir: ${String(err)}`, code: "REMOVE_FAILED" } };
+      }
+      tasks.remove(id);
+      return { status: 204, body: null };
+    },
+    readLog: (id: string, tail: string | undefined): TaskEndpointOutcome => {
+      const mon = asMonitor(id);
+      if (mon === null) return notFound(id);
+      // 严格十进制（Review 修复）：Number() 会放过 "0x10"/"1e2"/" 5"——正则先行，
+      // 范围校验仍由 readLogTail 把关（防御纵深）
+      const raw = tail ?? String(LIMITS.logTailDefaultLines);
+      if (!/^\d+$/.test(raw)) {
+        return {
+          status: 400,
+          body: { error: `tail must be an integer in [1, ${LIMITS.logTailMaxLines}]`, code: "INVALID_TAIL" },
+        };
+      }
+      const r = mon.readLogTail(Number(raw));
+      return r.ok ? { status: 200, body: r.text } : { status: r.status, body: r.error };
     },
   };
 

@@ -1,24 +1,31 @@
-// 单任务状态机（PLAN §2.4/§2.5/§2.7/§2.8 / §6.1；SERVER-PLAN 阶段 D 骨架 + 阶段 E 管线全套）
-// 全部状态枚举一次成型（TaskState 已含 idle/stopped/orphaned/parked），已激活：
+// 单任务状态机（PLAN §2.4/§2.5/§2.7/§2.8 / §6.1；SERVER-PLAN 阶段 D 骨架 + 阶段 E 管线
+// 全套 + 阶段 F 裁决与管理）。已激活状态路径：
 //   running ──► completed(exit "0") / failed(非零或信号)     —— 自然收尾路径
 //   running ──► orphaned（通知目的地 session 死亡）           —— §2.8.2 + SERVER-PLAN §三-1
 //   running ──► stopped（max_events 即停即杀，PLAN §3.3）      —— 阶段 E
-// 留待后续：idle 两段式裁决 + stop/keepalive（F）；reattach 认领 fromMeta（G）。
+//   running ──► idle（静默 idle_timeout_ms，裁决通知）          —— 阶段 F（§2.7 两段式）
+//   idle ──► running（keepalive / 新输出自愈，重武装计时）      —— 阶段 F
+//   idle ──► stopped（宽限一个完整窗口仍无裁决 → 自动杀）       —— 阶段 F（§三-5）
+//   running/idle ──► stopped（stop 端点 / update 降额即杀）    —— 阶段 F
+// 留待后续：reattach 认领 fromMeta（G）。
 //
 // 驱动：单一 250ms tick（SERVER-PLAN §一）——tail 增量 → 管线（preview 收集【前置于
 // pattern 过滤】——§2.5 末 v1 bug 根治点 → scanned/matched 计数 → pattern 过滤 →
-// coalesce 入窗/直通）→ coalesce 到期 flush → 令牌桶 + max_events 节流投递 → 进程
-// 死活检查 → 终态收尾（尾批 flush 先入链，lifecycle 恒 queue 且不计 max_events、
-// 绕令牌桶，PLAN §2.7-4）。
+// coalesce 入窗/直通）→ coalesce 到期 flush → 令牌桶 + max_events 节流投递 → idle/
+// 宽限到期检查（F——v1 的独立 idleTimer/graceTimer 全部收进 tick，不自持定时器）
+// → 进程死活检查 → 终态收尾（尾批 flush 先入链，lifecycle 恒 queue 且不计 max_events、
+// 绕令牌桶，PLAN §2.7-4；idle 裁决通知同规则）。
 // 即停即杀触发点：第 max_events 条 wake 成功送达（onDelivered）——失败的通知不占额
 // （D 阶段裁定：events_sent 成功回调计数 + wakeInFlight 防超发，与 v1 入链计数有意
 // 分歧，进度记录在案）。
-// createTask 编排：validate（shared）→ resolveTarget 白名单（400）→ directory 存在
-// （400，同步本地校验先于网络）→ session 存活（404）→ spawn → 看护接管。
-// fail fast 全过才开始执行。
+// idle 语义（v1 资产继承）：任何输出（含被过滤/被节流行）重置静默计时；转 idle 前
+// 冲净 coalesce 批尾（裁决通知不得吞批尾）；裁决/退出通知恒 queue 绕桶不占额。
+// createTask 编排：validate（shared）→ session 存活上限 16（⓪，本地先于网络）→
+// resolveTarget 白名单（400）→ directory 存在（400，同步本地校验先于网络）→
+// session 存活（404）→ spawn → 看护接管。fail fast 全过才开始执行。
 
 import { randomBytes } from "node:crypto";
-import { rmSync, statSync } from "node:fs";
+import { closeSync, fstatSync, openSync, readSync, rmSync, statSync } from "node:fs";
 import {
   LIMITS,
   buildEnvelope,
@@ -35,7 +42,7 @@ import { initTaskDir, readExitFile, writeMeta, type TaskFilePaths, type TaskMeta
 import { LogTail } from "./tail.ts";
 import { Coalescer, TokenBucket, formatCoalesced, makeMatcher, type Matcher } from "./pipeline.ts";
 import { DeliverChain, deliverNotification, type DeliverOutcome } from "./deliver.ts";
-import type { TaskRegistry } from "./registry.ts";
+import { isAliveState, type TaskRegistry } from "./registry.ts";
 
 // ---------------------------------------------------------------------------
 // createTask：fail fast 校验 + spawn + 看护接管
@@ -61,6 +68,26 @@ export type CreateTaskOutcome =
   | { ok: true; info: PublicInfo }
   | { ok: false; status: number; error: ApiError };
 
+/** 管理端点（stop/keepalive/PATCH/log）出参：http 层直接映射 status + body */
+export type ManageOutcome = CreateTaskOutcome;
+
+/** GET log 出参（裸文本，非 PublicInfo） */
+export type ReadLogOutcome =
+  | { ok: true; text: string }
+  | { ok: false; status: number; error: ApiError };
+
+/** session 存活上限拒绝（首查与复检共用出参） */
+function sessionCapError(sessionId: string): { ok: false; status: number; error: ApiError } {
+  return {
+    ok: false,
+    status: 400,
+    error: {
+      error: `session ${sessionId} already has ${LIMITS.sessionMaxAliveTasks} live tasks (per-session cap)`,
+      code: "SESSION_TASK_LIMIT",
+    },
+  };
+}
+
 export async function createTask(
   deps: MonitorDeps & { registry: TaskRegistry },
   body: unknown,
@@ -71,6 +98,12 @@ export async function createTask(
     return { ok: false, status: 400, error: { error: "invalid task input", code: "INVALID_INPUT", detail: v.violations } };
   }
   const input = v.value;
+
+  // fail fast ⓪：每 session 存活任务上限（PLAN §2.4——服务端内存态，R5-2 根治；
+  // 本地纯内存检查先于一切网络校验）
+  if (deps.registry.aliveCountForSession(input.session_id) >= LIMITS.sessionMaxAliveTasks) {
+    return sessionCapError(input.session_id);
+  }
 
   // fail fast ①：opencode_port 白名单三层校验（§2.8.1——模型幻觉端口/任意本地服务拒绝）
   const target = await resolveTarget(deps.ocRegistry, input.opencode_port, deps.env, ocDeps);
@@ -104,6 +137,14 @@ export async function createTask(
         code: "SESSION_NOT_FOUND",
       },
     };
+  }
+
+  // fail fast ⓪′：session 上限复检（Review 修复：TOCTOU 防御）——首查 ⓪ 与登记之间
+  // 经历两次网络 await，同 session 并发创建可同时通过首查；本复检之后至
+  // registry.add 全程同步（initTaskDir/spawnTask/构造/add 均无 await），检查-登记
+  // 原子化，并发竞态窗口闭合
+  if (deps.registry.aliveCountForSession(input.session_id) >= LIMITS.sessionMaxAliveTasks) {
+    return sessionCapError(input.session_id);
   }
 
   const id = `mon_${randomBytes(6).toString("hex")}`;
@@ -145,6 +186,7 @@ export async function createTask(
     events_dropped: 0,
     state: "running",
     exit_info: null,
+    grace_deadline: null,
     claimed_by: process.pid,
     updated_at: now,
   };
@@ -202,6 +244,10 @@ export class Monitor {
   private notifySeq = 0;
   /** 在途 wake 数——与 events_sent 合用构成 max_events 判定（防异步投递窗口超发） */
   private wakeInFlight = 0;
+  /** 最近一次输出/keepalive 时刻（v1 资产：任何输出重置静默计时，含被过滤/被节流行；
+   *  spawn 即武装——从未输出的任务静默满窗口同样触发裁决）。不落盘：G 阶段 reattach
+   *  按"无观察者不计时，重挂后从零武装"（PLAN §2.9-4） */
+  private lastActivityAt: number;
 
   constructor(deps: MonitorDeps, meta: TaskMeta, paths: TaskFilePaths) {
     this.deps = deps;
@@ -211,6 +257,7 @@ export class Monitor {
     this.identity = { pid: meta.pid ?? -1, startTime: meta.proc_start_time };
     this.pgid = meta.pgid ?? meta.pid ?? -1;
     this.now = deps.now ?? (() => Date.now());
+    this.lastActivityAt = this.now(); // spawn 即武装静默计时（v1 armIdle-at-start 语义）
     this.matcher = makeMatcher(meta.pattern, meta.wake_mode);
     this.bucket = new TokenBucket({ now: this.now });
     this.coalescer = meta.coalesce_ms > 0 ? new Coalescer(meta.coalesce_ms) : null;
@@ -247,8 +294,12 @@ export class Monitor {
       coalesce_ms: m.coalesce_ms,
       max_events: m.max_events,
       idle_timeout_ms: m.idle_timeout_ms,
-      idle_deadline: null, // F 阶段激活（idle 两段式裁决）
-      grace_deadline: null, // F 阶段激活
+      // F 阶段激活（PLAN §2.7）：仅 idle 态非 null——idle_deadline 是宽限期剩余毫秒
+      // （序列化时动态计算，agent 直接可读"还剩多久被杀"）；grace_deadline 是绝对
+      // 截止 epoch ms（机器精确；与 meta.grace_deadline 同源）
+      idle_deadline:
+        m.state === "idle" && m.grace_deadline !== null ? Math.max(0, m.grace_deadline - this.now()) : null,
+      grace_deadline: m.state === "idle" ? m.grace_deadline : null,
       started_at: m.started_at,
       pid: m.pid,
       lines_scanned: m.lines_scanned,
@@ -263,7 +314,8 @@ export class Monitor {
   }
 
   // -------------------------------------------------------------------
-  // tick：读增量 → 管线 → coalesce 到期 → 死活检查 → 收尾
+  // tick：读增量 → 管线 → coalesce 到期 → idle/宽限到期 → 死活检查 → 收尾
+  // （F 起 v1 的独立 idleTimer/graceTimer 全部收进本 tick，不自持定时器）
 
   private async tick(): Promise<void> {
     if (this.finalizing) return;
@@ -273,8 +325,15 @@ export class Monitor {
         await this.finalize();
         return;
       }
-      this.pump();
-      this.flushCoalesceIfDue();
+      this.pump(); // idle 态下有输出会在 pump 内自愈回 running（v1 资产）
+      if (this.meta.state === "running") {
+        this.flushCoalesceIfDue();
+        if (this.now() - this.lastActivityAt >= this.meta.idle_timeout_ms) this.enterIdle();
+      } else if (this.meta.state === "idle") {
+        const gd = this.meta.grace_deadline;
+        // 宽限期 = 一个完整 idle_timeout_ms 窗口（SERVER-PLAN §三-5）；到期仍 idle → 自动杀
+        if (gd !== null && this.now() >= gd) void this.stopForIdleTimeout();
+      }
     } catch (err) {
       this.safeLog(`task ${this.id} tick error: ${String(err)}`);
     }
@@ -298,11 +357,18 @@ export class Monitor {
     }
   }
 
-  /** 读增量并走管线：preview 收集（前置，§2.5 末）→ scanned → pattern 过滤 →
-   *  命中行入 coalesce 窗（或直通 dispatch）。offset 持久化。 */
+  /** 读增量并走管线：静默计时重置（任何输出都算活动，含被过滤/被节流行——v1 资产）
+   *  → idle 自愈（新输出 → running，v1 resumeRunning）→ preview 收集（前置，§2.5 末）
+   *  → scanned → pattern 过滤 → 命中行入 coalesce 窗（或直通 dispatch）。offset 持久化。 */
   private pump(): void {
     const r = this.tail.poll();
     if (r.bytesConsumed === 0) return;
+    this.lastActivityAt = this.now();
+    if (this.meta.state === "idle") {
+      this.meta.state = "running";
+      this.meta.grace_deadline = null;
+      this.safeLog(`task ${this.id} resumed running (new output during idle grace)`);
+    }
     this.totalBytes += r.bytesConsumed;
     this.ingestLines(r.lines, true);
     this.persistOffset();
@@ -414,7 +480,24 @@ export class Monitor {
     });
   }
 
-  private enqueueNotification(n: { kind: "wake" | "lifecycle"; delivery: Delivery; text: string }): void {
+  /** idle 裁决通知（§2.7 两段式第一段）：文案 v1 资产继承，工具话术指向 v2 的
+   *  monitor_manage（PLAN §3.4）。与 lifecycle 同规则：恒 queue、绕令牌桶、不计
+   *  max_events（PLAN §2.7-4"退出/裁决"同级）——裁决必须到达 agent。 */
+  private emitIdleNotice(ms: number): void {
+    const body = [
+      `monitor idle: no output for ${ms}ms — command still running (pid ${this.meta.pid}).`,
+      `Keep it: monitor_manage(action="keepalive", monitor_id="${this.id}") resets the idle timer.`,
+      `Kill it now: monitor_manage(action="stop", monitor_id="${this.id}").`,
+      `No decision within ${ms}ms (grace period): it will be killed automatically.`,
+    ].join("\n");
+    this.enqueueNotification({
+      kind: "idle",
+      delivery: "queue",
+      text: buildEnvelope({ id: this.id, description: this.meta.description, body }),
+    });
+  }
+
+  private enqueueNotification(n: { kind: "wake" | "lifecycle" | "idle"; delivery: Delivery; text: string }): void {
     const idem = `msg_omt_${INSTANCE_EPOCH}_${this.id}_${this.notifySeq++}`; // Session.Message.ID pattern ^msg_（真机实测：非 msg_ 前缀 400）
     const p = this.chain.run(() =>
       deliverNotification(
@@ -442,7 +525,7 @@ export class Monitor {
 
   /** onDelivered 的错误围栏：投递簿记里的任何异常（如 meta 落盘磁盘错误）不得变成
    *  unhandled rejection——那会经 uncaughtException 把整个服务端拖垮（main.ts exit 1） */
-  private safeOnDelivered(kind: "wake" | "lifecycle", outcome: DeliverOutcome): void {
+  private safeOnDelivered(kind: "wake" | "lifecycle" | "idle", outcome: DeliverOutcome): void {
     try {
       this.onDelivered(kind, outcome);
     } catch (err) {
@@ -450,11 +533,11 @@ export class Monitor {
     }
   }
 
-  private onDelivered(kind: "wake" | "lifecycle", outcome: DeliverOutcome): void {
+  private onDelivered(kind: "wake" | "lifecycle" | "idle", outcome: DeliverOutcome): void {
     if (outcome.ok) {
       if (kind === "wake") {
         this.wakeInFlight--;
-        this.meta.events_sent += 1; // lifecycle 不计（不占 max_events 额度）
+        this.meta.events_sent += 1; // lifecycle/idle 不计（不占 max_events 额度）
         this.safeWriteMeta();
         // 即停即杀（PLAN §3.3 "达顶即停即杀"）：第 max_events 条 wake 成功送达。
         // 竞态幂等：若进程已先自然死亡（finalize 已收尾），stopForMaxEvents 早退，
@@ -505,6 +588,7 @@ export class Monitor {
     const raw = await this.readExitWithGrace();
     const code = exitCodeFromRaw(raw);
     this.meta.state = code === "0" ? "completed" : "failed";
+    this.meta.grace_deadline = null;
     this.meta.exit_info = { code, reason: reasonFromCode(code) };
     this.emitLifecycle();
     this.safeWriteMeta();
@@ -512,10 +596,21 @@ export class Monitor {
     this.safeLog(`task ${this.id} finished: ${this.meta.state} exit=${code}`);
   }
 
-  /** max_events 即停即杀（PLAN §3.3）：SIGTERM 温和停止进程组（killTree 两档），
-   *  state=stopped，lifecycle 注明原因。经 void 调用（onDelivered 同步回调内）——
-   *  全程围栏，异常外泄即 unhandled rejection（orphan 同款纪律） */
-  private async stopForMaxEvents(): Promise<void> {
+  /** max_events 即停即杀（PLAN §3.3）：第 max_events 条 wake 成功送达回调触发。
+   *  竞态幂等：若进程已先自然死亡（finalize 已收尾），自然终态优先——退出结局已由
+   *  lifecycle 送达，语义无损 */
+  private stopForMaxEvents(): Promise<void> {
+    return this.stopAndFinalize(
+      `reason: reached max_events=${this.meta.max_events}`,
+      `task ${this.id} stopped: reached max_events=${this.meta.max_events}`,
+    );
+  }
+
+  /** 人为/超限停止公共路径（F 提取，三路复用）：尾批 flush → SIGTERM 温和杀进程组
+   *  （killTree 两档）→ stopped 终态 → lifecycle 注明 reason。调用方：stopForMaxEvents
+   *  / stopForIdleTimeout / requestStop。经 void 调用（onDelivered 同步回调内）或
+   *  await（管理端点）——全程围栏，异常外泄即 unhandled rejection（orphan 同款纪律） */
+  private async stopAndFinalize(lifecycleReason: string, logLine: string): Promise<void> {
     if (this.finalizing) return; // 自然收尾/orphan/已停：先到者赢
     this.finalizing = true;
     this.stopTimer();
@@ -525,16 +620,16 @@ export class Monitor {
       const raw = await this.readExitWithGrace();
       const code = exitCodeFromRaw(raw);
       this.meta.state = "stopped";
+      this.meta.grace_deadline = null;
       this.meta.exit_info = { code, reason: reasonFromCode(code) };
-      this.emitLifecycle(`reason: reached max_events=${this.meta.max_events}`);
+      this.emitLifecycle(lifecycleReason);
       this.safeWriteMeta();
       this.tail.close();
-      this.safeLog(
-        `task ${this.id} stopped: reached max_events=${this.meta.max_events} (process group killed, tier=${tier}, exit=${code})`,
-      );
+      this.safeLog(`${logLine} (process group killed, tier=${tier}, exit=${code})`);
     } catch (err) {
       // 看护撤除路径故障（如磁盘错误）：状态兜底推进 + 留痕，绝不外泄
       this.meta.state = "stopped";
+      this.meta.grace_deadline = null;
       this.meta.exit_info = this.meta.exit_info ?? { code: "unknown", reason: "unknown" };
       try {
         this.writeMeta();
@@ -543,6 +638,131 @@ export class Monitor {
       }
       this.tail.close(); // close 内部自吞错
       this.safeLog(`task ${this.id} stop error (state forced to stopped): ${String(err)}`);
+    }
+  }
+
+  // -------------------------------------------------------------------
+  // idle 两段式裁决（PLAN §2.7；v1 enterIdleGrace 资产，tick 驱动版）
+
+  /** 第一段：静默满窗口（任何输出/keepalive 都会重置 lastActivityAt）→ 冲净批尾
+   *  → 转 idle → 裁决通知（恒 queue 绕桶不占额）→ 宽限一个完整窗口（§三-5）。 */
+  private enterIdle(): void {
+    if (this.meta.state !== "running") return; // v1 guard：仅 running 态进入
+    const ms = this.meta.idle_timeout_ms;
+    this.flushCoalesceNow(); // 批尾先入链（v1：裁决通知不得吞批尾——此时 state 仍 running）
+    this.meta.state = "idle";
+    this.meta.grace_deadline = this.now() + ms;
+    this.safeWriteMeta();
+    this.emitIdleNotice(ms);
+    this.safeLog(`task ${this.id} idle ${ms}ms without output — arbitration notice sent (grace ${ms}ms)`);
+  }
+
+  /** 第二段：宽限到期仍 idle（无 keepalive、无输出自愈）→ 自动杀（v1 reason 文案原样） */
+  private stopForIdleTimeout(): Promise<void> {
+    const ms = this.meta.idle_timeout_ms;
+    const reason = `idle timeout after ${ms}ms without output (no keepalive within ${ms}ms grace period)`;
+    return this.stopAndFinalize(`reason: ${reason}`, `task ${this.id} stopped: ${reason}`);
+  }
+
+  // -------------------------------------------------------------------
+  // 管理操作（阶段 F；PLAN §2.2 端点语义，v1 stop/keepalive/update 资产继承）
+
+  /** 管理操作存活门卫：终态、或收尾中（finalizing 窗口内 meta.state 尚未落终态——
+   *  Review 修复：旧实此刻按 running 放行并翻转状态，响应声称任务活着）一律 409；
+   *  null = 放行（live 判谓单源于 registry.isAliveState，勿另立副本） */
+  private liveGuardError(action: string): ApiError | null {
+    if (this.finalizing) {
+      return { error: `task ${this.id} is finalizing (${action} is for live tasks)`, code: "TASK_TERMINAL" };
+    }
+    if (!isAliveState(this.meta.state)) {
+      return { error: `task ${this.id} already ${this.meta.state} (${action} is for live tasks)`, code: "TASK_TERMINAL" };
+    }
+    return null;
+  }
+
+  /** POST /api/tasks/:id/stop：running/idle → 温和停止（await 完成后返回终态快照，
+   *  响应准确反映结局——管理操作低频，killTree+exit 宽限的亚秒等待可接受）；
+   *  终态 → 幂等 200 返回当前快照（v1 语义：already stopped 亦是成功） */
+  async requestStop(): Promise<ManageOutcome> {
+    if (!isAliveState(this.meta.state)) {
+      return { ok: true, info: this.toPublicInfo() };
+    }
+    await this.stopAndFinalize("reason: stopped by request", `task ${this.id} stopped: by request`);
+    return { ok: true, info: this.toPublicInfo() };
+  }
+
+  /** POST /api/tasks/:id/keepalive：idle → 复活 running + 重置静默计时（v1
+   *  resumeRunning + armIdle）；running → 无害显式保活（仅重置计时）；
+   *  终态/收尾中 → 409 拒绝（阶段 F 验收判据：终态上 keepalive/update 拒绝） */
+  keepalive(): ManageOutcome {
+    const guard = this.liveGuardError("keepalive");
+    if (guard !== null) return { ok: false, status: 409, error: guard };
+    if (this.meta.state === "idle") {
+      this.meta.state = "running";
+      this.meta.grace_deadline = null;
+      this.lastActivityAt = this.now();
+      this.safeWriteMeta();
+      this.safeLog(`task ${this.id} resumed running (keepalive)`);
+    } else {
+      this.lastActivityAt = this.now(); // running：无害显式保活（v1 语义）
+    }
+    return { ok: true, info: this.toPublicInfo() };
+  }
+
+  /** PATCH /api/tasks/:id（max_events 运行时调整，PLAN §3.3 "运行中可调"）：
+   *  降额后已达标（events_sent ≥ 新值）→ 立即即停即杀（v1 资产 same ceiling rule）；
+   *  在途 wake 补足的情形由 onDelivered 用新上限自然触发。终态/收尾中 → 409。 */
+  async updateMaxEvents(n: number): Promise<ManageOutcome> {
+    const guard = this.liveGuardError("update");
+    if (guard !== null) return { ok: false, status: 409, error: guard };
+    this.meta.max_events = n;
+    this.safeWriteMeta();
+    if (this.meta.events_sent >= n) {
+      await this.stopAndFinalize(
+        `reason: reached max_events=${n} (lowered by update)`,
+        `task ${this.id} stopped: reached max_events=${n} (lowered by update)`,
+      );
+    }
+    return { ok: true, info: this.toPublicInfo() };
+  }
+
+  /** GET /api/tasks/:id/log?tail=N：原始合并流尾部 N 行（默认 20；裸文本响应——
+   *  log 是 tail 读者的原始管道，此处只取尾不清洗）。
+   *  有界读（Review 修复）：log 无轮转无上界（§9-2），整读会在事件循环上同步阻塞
+   *  全部任务看护、内存尖峰可 OOM——只读尾 logTailMaxBytes 字节再切行；窗口起点
+   *  落在行中/字符中时丢弃窗口首行（恰齐行界时保守丢弃一行，tail 语义无损），
+   *  窗口内无换行（巨型单行）则整窗返回其尾部；超长行场景返回行数可能少于请求 */
+  readLogTail(lines: number): ReadLogOutcome {
+    if (!Number.isInteger(lines) || lines < 1 || lines > LIMITS.logTailMaxLines) {
+      return {
+        ok: false,
+        status: 400,
+        error: { error: `tail must be an integer in [1, ${LIMITS.logTailMaxLines}]`, code: "INVALID_TAIL" },
+      };
+    }
+    let fd: number;
+    try {
+      fd = openSync(this.paths.log, "r");
+    } catch {
+      return { ok: true, text: "" }; // log 不可读（理论不可达：spawnTask 先建 log）→ 空尾
+    }
+    try {
+      const size = fstatSync(fd).size;
+      const start = Math.max(0, size - LIMITS.logTailMaxBytes);
+      const len = size - start;
+      const buf = Buffer.alloc(len);
+      let got = 0;
+      while (got < len) {
+        const n = readSync(fd, buf, got, len - got, start + got);
+        if (n <= 0) break; // EOF（并发写不影响：读到多少算多少）
+        got += n;
+      }
+      let parts = buf.subarray(0, got).toString("utf8").split("\n");
+      if (parts.length > 0 && parts[parts.length - 1] === "") parts.pop(); // 尾换行不成品行
+      if (start > 0 && parts.length > 1) parts = parts.slice(1); // 窗口首行是残行
+      return { ok: true, text: parts.slice(-lines).join("\n") };
+    } finally {
+      closeSync(fd); // close 内部不抛（fd 由 openSync 保证有效）
     }
   }
 
@@ -558,6 +778,7 @@ export class Monitor {
       const raw = await this.readExitWithGrace();
       const code = exitCodeFromRaw(raw);
       this.meta.state = "orphaned";
+      this.meta.grace_deadline = null;
       this.meta.exit_info = { code, reason: reasonFromCode(code) };
       this.safeWriteMeta();
       this.tail.close();

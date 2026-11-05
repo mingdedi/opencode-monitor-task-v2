@@ -44,6 +44,13 @@ export const LIMITS = {
   maxMaxEvents: 10_000,
   /** idle_timeout_ms 上界（含） */
   maxIdleTimeoutMs: 3_600_000,
+  /** GET /api/tasks/:id/log 默认携带行数（PLAN §2.2） */
+  logTailDefaultLines: 20,
+  /** log tail= 上界（防滥用；单次响应体积上限量级） */
+  logTailMaxLines: 1000,
+  /** log tail 单次读取的字节上界（有界读——log 无轮转无上界，整读会阻塞事件循环
+   *  且内存尖峰可拖垮全部任务看护）；超长行场景下返回行数可能少于请求 */
+  logTailMaxBytes: 4 * 1024 * 1024,
   /** 服务端 HTTP 请求体上限（防滥用；任务参数远小于此） */
   httpBodyMaxBytes: 262_144,
 } as const;

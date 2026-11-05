@@ -66,6 +66,10 @@ export interface TaskMeta {
   events_dropped: number;
   state: TaskState;
   exit_info: ExitInfo | null;
+  /** idle 两段式裁决（PLAN §2.7）：idle 态 = 宽限期截止 epoch ms（宽限 = 一个完整
+   *  idle_timeout_ms 窗口，SERVER-PLAN §三-5）；非 idle 恒 null。G 阶段 reattach
+   *  按"无观察者不计时，重挂后从零武装"（PLAN §2.9-4）——恢复时不沿用旧值 */
+  grace_deadline: number | null;
   /** 当前看护进程 pid——双认领防御 */
   claimed_by: number;
   updated_at: number;

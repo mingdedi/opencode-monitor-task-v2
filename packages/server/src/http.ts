@@ -1,23 +1,31 @@
 // HTTP 层（PLAN §2.2 / §6.1）：node:http 自建路由/鉴权/JSON，无框架依赖。
 // 阶段 D：+ POST /api/tasks（创建）、GET /api/tasks（列表，?session_id= 过滤）、
 //         GET /api/tasks/:id（详情）——业务经 tasks 注入，本层只做路由/鉴权/JSON/状态映射。
-// 阶段 F：+ PATCH/stop/keepalive/DELETE/log；阶段 G：+ /api/shutdown。
+// 阶段 F：+ PATCH /api/tasks/:id（max_events）、POST :id/stop、POST :id/keepalive、
+//         DELETE /api/tasks/:id（204）、GET :id/log?tail=N。
+// 阶段 G：+ /api/shutdown。
 // 鉴权：Basic auth username 固定 "monitor"（PLAN §2.2），未授权一律 401 JSON。
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { timingSafeEqual } from "node:crypto";
 import { LIMITS, type ApiError, type HealthInfo, type PublicInfo } from "@omt/shared";
 
-/** 任务端点统一出参：status + body（http 层不做业务判断） */
+/** 任务端点统一出参：status + body（http 层不做业务判断；204 时 body 为 null——
+ *  DELETE 成功无响应体） */
 export interface TaskEndpointOutcome {
   status: number;
-  body: PublicInfo | ApiError | PublicInfo[];
+  body: PublicInfo | ApiError | PublicInfo[] | string | null;
 }
 
 export interface TasksApi {
   create: (body: unknown) => Promise<TaskEndpointOutcome>;
   list: (sessionId: string | undefined) => TaskEndpointOutcome;
   get: (id: string) => TaskEndpointOutcome;
+  patch: (id: string, body: unknown) => Promise<TaskEndpointOutcome>;
+  stop: (id: string) => Promise<TaskEndpointOutcome>;
+  keepalive: (id: string) => TaskEndpointOutcome;
+  remove: (id: string) => TaskEndpointOutcome;
+  readLog: (id: string, tail: string | undefined) => TaskEndpointOutcome;
 }
 
 export interface MonitorHttpOptions {
@@ -29,6 +37,11 @@ export interface MonitorHttpOptions {
 }
 
 function send(res: ServerResponse, status: number, body: unknown): void {
+  if (status === 204) {
+    // 204 无响应体（DELETE 成功；RFC 语义——带 body 的 204 会被部分客户端截断报错）
+    res.writeHead(204).end();
+    return;
+  }
   res.writeHead(status, { "content-type": "application/json; charset=utf-8" });
   res.end(JSON.stringify(body));
 }
@@ -95,11 +108,65 @@ async function handle(req: IncomingMessage, res: ServerResponse, opts: MonitorHt
   }
   const m = /^\/api\/tasks\/(mon_[a-z0-9]+)$/.exec(url.pathname);
   if (m && opts.tasks) {
+    const id = m[1]!;
+    if (req.method === "GET") {
+      const r = opts.tasks.get(id);
+      send(res, r.status, r.body);
+      return;
+    }
+    if (req.method === "PATCH") {
+      const body = await readBody(req);
+      if (!body.ok) {
+        send(res, 413, { error: "request body too large", code: "BODY_TOO_LARGE" });
+        return;
+      }
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(body.data.toString("utf8"));
+      } catch {
+        send(res, 400, { error: "request body is not valid JSON", code: "INVALID_JSON" });
+        return;
+      }
+      const r = await opts.tasks.patch(id, parsed);
+      send(res, r.status, r.body);
+      return;
+    }
+    if (req.method === "DELETE") {
+      const r = await opts.tasks.remove(id);
+      send(res, r.status, r.body);
+      return;
+    }
+    send(res, 405, { error: "method not allowed", code: "METHOD" });
+    return;
+  }
+  const sub = /^\/api\/tasks\/(mon_[a-z0-9]+)\/(stop|keepalive|log)$/.exec(url.pathname);
+  if (sub && opts.tasks) {
+    const id = sub[1]!;
+    const action = sub[2]!;
+    if (action === "stop") {
+      if (req.method !== "POST") {
+        send(res, 405, { error: "method not allowed", code: "METHOD" });
+        return;
+      }
+      const r = await opts.tasks.stop(id);
+      send(res, r.status, r.body);
+      return;
+    }
+    if (action === "keepalive") {
+      if (req.method !== "POST") {
+        send(res, 405, { error: "method not allowed", code: "METHOD" });
+        return;
+      }
+      const r = opts.tasks.keepalive(id);
+      send(res, r.status, r.body);
+      return;
+    }
+    // log
     if (req.method !== "GET") {
       send(res, 405, { error: "method not allowed", code: "METHOD" });
       return;
     }
-    const r = opts.tasks.get(m[1]!);
+    const r = opts.tasks.readLog(id, url.searchParams.get("tail") ?? undefined);
     send(res, r.status, r.body);
     return;
   }

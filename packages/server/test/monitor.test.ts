@@ -7,10 +7,10 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test, before, after } from "node:test";
-import { opencodeServicePath, taskDir, type PathEnv, type PublicInfo } from "@omt/shared";
-import { buildRegistry, type OpencodeRegistry } from "../src/opencode.ts";
+import { LIMITS, opencodeServicePath, taskDir, type PathEnv, type PublicInfo } from "@omt/shared";
+import { buildRegistry, type OcDeps, type OpencodeRegistry } from "../src/opencode.ts";
 import { isTaskProcessAlive } from "../src/spawner.ts";
-import { readMeta } from "../src/taskstore.ts";
+import { readMeta, type TaskMeta } from "../src/taskstore.ts";
 import { createTask, type CreateTaskOutcome, type MonitorDeps, type Monitor } from "../src/monitor.ts";
 import { TaskRegistry } from "../src/registry.ts";
 
@@ -482,6 +482,344 @@ test("窗口到期 flush：行到达后进程仍活，窗口到期由 tick 驱�
   assert.ok(textOf(syn[0]!).includes("early-e"));
   assert.ok(textOf(syn[0]!).includes("[1 line coalesced]"));
   assert.ok(textOf(syn[1]!).includes("finished: completed"));
+});
+
+// ---------------------------------------------------------------------------
+// 阶段 F：idle 两段式裁决 + 管理操作 + session 上限
+
+test("idle 两段式全路径：静默 → idle + 裁决通知（queue/不占额）→ 宽限到期自动杀", async () => {
+  const r = rig();
+  // 静默 1.2s：idle_timeout_ms=400 → t≈400 转 idle + 裁决通知；宽限 400ms → t≈800 自动杀。
+  // 命令活 5s 保证各阶段按裁决而非自然死亡推进
+  const out = await create(r, validBody({ command: "sleep 5", idle_timeout_ms: 400, coalesce_ms: 0 }));
+  assert.equal(out.ok, true);
+  if (!out.ok) return;
+  const id = out.info.id;
+  const pid = out.info.pid!;
+
+  // 第一段：转 idle，PublicInfo 暴露宽限（idle_deadline 剩余毫秒 + grace_deadline epoch）
+  assert.ok(await waitFor(() => info(r, id).state === "idle"), "should enter idle");
+  const idleInfo = info(r, id);
+  assert.ok(idleInfo.grace_deadline !== null && idleInfo.grace_deadline > Date.now() - 100, "grace deadline set");
+  assert.ok(idleInfo.idle_deadline !== null && idleInfo.idle_deadline > 0 && idleInfo.idle_deadline <= 400, `remaining=${idleInfo.idle_deadline}`);
+  // 裁决通知：恒 queue、不占 max_events 额度（sent 恒 0）
+  const arb = syntheticCalls(r).map(textOf).find((t) => t.includes("monitor idle:"));
+  assert.ok(arb !== undefined, "arbitration notice sent");
+  assert.ok(arb.includes("no output for 400ms"), arb);
+  assert.ok(arb.includes(`monitor_manage(action="keepalive", monitor_id="${id}")`), arb);
+  assert.ok(arb.includes("grace period"), arb);
+  assert.ok(r.logs.some((l) => l.includes("idle 400ms without output")), r.logs.join(" | "));
+
+  // 第二段：宽限到期自动杀（v1 reason 文案）
+  assert.ok(await waitFor(() => info(r, id).state === "stopped"), "auto-killed after grace");
+  const final = info(r, id);
+  assert.equal(final.exit_info!.code, "signal:15");
+  assert.equal(final.grace_deadline, null, "终态清空宽限");
+  assert.ok(await waitFor(() => !isTaskProcessAlive({ pid, startTime: null })), "process group killed");
+  const lc = syntheticCalls(r).map(textOf).find((t) => t.includes("finished:"));
+  assert.ok(lc !== undefined && lc.includes("idle timeout after 400ms without output"), lc);
+  assert.ok(lc.includes("no keepalive within 400ms grace period"), lc);
+  // 计量：裁决通知与 lifecycle 都不占 wake 额度
+  assert.equal(final.events_sent, 0);
+});
+
+test("idle 自愈：静默转 idle 后恢复输出 → running，继续到自然终态（宽限不再杀）", async () => {
+  const r = rig();
+  // 自愈窗口：t≈600 转 idle；t≈900 输出 → 自愈回 running；t≈1300 自然退出
+  // （自愈后静默 400ms < 600ms 窗口，不再二次转 idle）
+  const out = await create(
+    r,
+    validBody({
+      command: "sleep 0.9; printf 'REVIVE-f line1\\nREVIVE-f line2\\n'; sleep 0.4",
+      idle_timeout_ms: 600,
+      coalesce_ms: 0,
+    }),
+  );
+  assert.equal(out.ok, true);
+  if (!out.ok) return;
+  const id = out.info.id;
+  assert.ok(await waitFor(() => info(r, id).state === "idle"), "enter idle first");
+  assert.ok(await waitFor(() => info(r, id).state === "running"), "self-heal to running on new output");
+  assert.ok(r.logs.some((l) => l.includes("resumed running (new output")), r.logs.join(" | "));
+  // 自愈后静默计时重置（剩余任务时长 < 500ms，不会再转 idle）→ 自然终态 completed
+  assert.ok(await waitFor(() => info(r, id).state === "completed"), "natural completion after self-heal");
+  const final = info(r, id);
+  assert.equal(final.events_sent, 2); // 直通逐行：2 条 wake（裁决通知不占额）
+  const syn = syntheticCalls(r);
+  assert.equal(syn.length, 4, "裁决通知 + 2 wake + lifecycle");
+  assert.ok(textOf(syn[0]!).includes("monitor idle:"), "裁决通知先于自愈后的 wake");
+  assert.ok(textOf(syn[syn.length - 1]!).includes("finished: completed"));
+});
+
+test("keepalive：idle → 复活 running + 宽限清空；终态 → 409 拒绝", async () => {
+  const r = rig();
+  const out = await create(r, validBody({ command: "sleep 30", idle_timeout_ms: 400, coalesce_ms: 0 }));
+  assert.equal(out.ok, true);
+  if (!out.ok) return;
+  const id = out.info.id;
+  const mon = r.registry.get(id) as Monitor;
+  assert.ok(await waitFor(() => info(r, id).state === "idle"), "enter idle");
+
+  // idle → keepalive：复活 + grace_deadline 清空 + 计时重置
+  const revived = mon.keepalive();
+  assert.equal(revived.ok, true);
+  assert.equal(revived.ok && revived.info.state, "running");
+  assert.equal(revived.ok && revived.info.grace_deadline, null);
+  assert.ok(r.logs.some((l) => l.includes("resumed running (keepalive)")), r.logs.join(" | "));
+
+  // 计时重置：再静默 400ms 会再次转 idle（而非被宽限杀）——然后人为收场
+  assert.ok(await waitFor(() => info(r, id).state === "idle", 3000), "re-enter idle after reset timer");
+  const stopped = await mon.requestStop();
+  assert.equal(stopped.ok, true);
+  assert.equal(stopped.ok && stopped.info.state, "stopped");
+
+  // 终态上 keepalive → 409（阶段 F 验收判据）
+  const rejected = mon.keepalive();
+  assert.equal(rejected.ok, false);
+  if (rejected.ok) return;
+  assert.equal(rejected.status, 409);
+  assert.equal(rejected.error.code, "TASK_TERMINAL");
+});
+
+test("update（PATCH max_events）：运行中调整生效；终态 → 409 拒绝", async () => {
+  const r = rig();
+  const out = await create(r, validBody({ command: "sleep 0.8", max_events: 10, coalesce_ms: 0 }));
+  assert.equal(out.ok, true);
+  if (!out.ok) return;
+  const id = out.info.id;
+  const mon = r.registry.get(id) as Monitor;
+  const up = await mon.updateMaxEvents(99);
+  assert.equal(up.ok, true);
+  assert.equal(up.ok && up.info.max_events, 99);
+  assert.equal((readMeta(env, id) as TaskMeta).max_events, 99, "调整落盘");
+
+  assert.ok(await waitFor(() => info(r, id).state === "completed"));
+  const rej = await mon.updateMaxEvents(5);
+  assert.equal(rej.ok, false);
+  if (rej.ok) return;
+  assert.equal(rej.status, 409);
+  assert.equal(rej.error.code, "TASK_TERMINAL");
+});
+
+test("update 降额即杀：max_events 降至 ≤ 已送达数 → 立即 stopped（v1 same ceiling rule）", async () => {
+  const r = rig();
+  // 先送出 2 条 wake，再降额到 1 → events_sent(2) ≥ 1 → 即停
+  const out = await create(
+    r,
+    validBody({ command: "printf 'L1\\nL2\\n'; sleep 30", coalesce_ms: 0, max_events: 50 }),
+  );
+  assert.equal(out.ok, true);
+  if (!out.ok) return;
+  const id = out.info.id;
+  assert.ok(await waitFor(() => info(r, id).events_sent === 2), "two wakes delivered");
+  const mon = r.registry.get(id) as Monitor;
+  const up = await mon.updateMaxEvents(1);
+  assert.equal(up.ok, true);
+  assert.equal(up.ok && up.info.state, "stopped", "lowered below sent → stopped immediately");
+  // lifecycle 在投递链上异步送达（await 返回 ≠ fetch 已发出）——等信封本身
+  assert.ok(
+    await waitFor(() => {
+      const lc = syntheticCalls(r).map(textOf).find((t) => t.includes("finished:"));
+      return lc !== undefined && lc.includes("reached max_events=1 (lowered by update)");
+    }),
+    "lifecycle with lowered-by-update reason",
+  );
+  const pid = out.info.pid!;
+  assert.ok(await waitFor(() => !isTaskProcessAlive({ pid, startTime: null })), "process group killed");
+});
+
+test("stop 端点：运行中 → 温和停止 stopped；终态幂等 200（v1 already-stopped 语义）", async () => {
+  const r = rig();
+  // echo 先行：等首条 wake 送达再 stop——排除"TERM 早于 bash 装载 trap"的启动竞态
+  // （该竞态下 exit 记 unknown，属进程管理三件套的已知窄窗口，stop 语义测的是稳态路径）
+  const out = await create(r, validBody({ command: "echo ready-stop; sleep 30", coalesce_ms: 0 }));
+  assert.equal(out.ok, true);
+  if (!out.ok) return;
+  const id = out.info.id;
+  const pid = out.info.pid!;
+  const mon = r.registry.get(id) as Monitor;
+  assert.ok(await waitFor(() => info(r, id).events_sent === 1), "startup line delivered (bash fully up)");
+  const stopped = await mon.requestStop();
+  assert.equal(stopped.ok, true);
+  assert.equal(stopped.ok && stopped.info.state, "stopped", "await 后返回终态快照");
+  assert.equal(stopped.ok && stopped.info.exit_info!.code, "signal:15");
+  assert.ok(await waitFor(() => !isTaskProcessAlive({ pid, startTime: null })), "process group killed");
+  // lifecycle 异步送达（await 返回 ≠ fetch 已发出）——等信封本身
+  assert.ok(
+    await waitFor(() => {
+      const lc = syntheticCalls(r).map(textOf).find((t) => t.includes("finished:"));
+      return lc !== undefined && lc.includes("reason: stopped by request");
+    }),
+    "lifecycle with stopped-by-request reason",
+  );
+  // 幂等：终态上再 stop → 200 同快照，不重复投递
+  const again = await mon.requestStop();
+  assert.equal(again.ok, true);
+  assert.equal(again.ok && again.info.state, "stopped");
+  const lifecycleCount = syntheticCalls(r).filter((c) => textOf(c).includes("finished:")).length;
+  assert.equal(lifecycleCount, 1, "no duplicate lifecycle");
+});
+
+test("idle 计时重置：持续输出不触发裁决（即便输出全部被过滤）", async () => {
+  const r = rig();
+  // idle_timeout_ms=600，任务每 250ms 输出一行 INFO（pattern 不命中）跑 1.5s：
+  // v1 资产"任何输出重置静默计时（含被节流/被过滤行）"——永不转 idle，自然终态
+  const out = await create(
+    r,
+    validBody({
+      command: "for i in 1 2 3 4 5 6; do printf 'INFO quiet %s\\n' \"$i\"; sleep 0.25; done",
+      pattern: "^NEVER",
+      idle_timeout_ms: 600,
+      coalesce_ms: 0,
+    }),
+  );
+  assert.equal(out.ok, true);
+  if (!out.ok) return;
+  const id = out.info.id;
+  assert.ok(await waitFor(() => info(r, id).state === "completed", 8000), "complete without idle");
+  const final = info(r, id);
+  assert.equal(final.state, "completed");
+  const arb = syntheticCalls(r).map(textOf).find((t) => t.includes("monitor idle:"));
+  assert.equal(arb, undefined, "no arbitration notice — filtered output still counts as activity");
+});
+
+test("session 并发上限：第 17 个存活任务 400 SESSION_TASK_LIMIT；跨 session 不受限", async () => {
+  const r = rig();
+  // 16 个长睡眠任务占满同一 session 的存活额度
+  for (let i = 0; i < 16; i++) {
+    const out = await create(r, validBody({ command: "sleep 60", description: `cap-${i}` }));
+    assert.equal(out.ok, true, `task ${i} should create`);
+  }
+  assert.equal(r.registry.aliveCountForSession(SESSION), 16);
+  const rejected = await create(r, validBody({ command: "sleep 60" }));
+  assert.equal(rejected.ok, false);
+  if (rejected.ok) return;
+  assert.equal(rejected.status, 400);
+  assert.equal(rejected.error.code, "SESSION_TASK_LIMIT");
+  assert.equal(r.registry.size, 16, "被拒任务不占 registry");
+
+  // 另一 session 不受影响
+  const other = await create(r, validBody({ command: "sleep 60", session_id: "ses_other" }));
+  assert.equal(other.ok, true);
+
+  // 清场：全量并行 stop（各自 killTree 200ms 宽限并发走，省时）
+  const stops = await Promise.all(
+    r.registry.listInfos().map((t) => (r.registry.get(t.id) as Monitor).requestStop()),
+  );
+  for (const st of stops) assert.equal(st.ok, true);
+  assert.equal(r.registry.aliveCount(), 0);
+});
+
+test("readLogTail：默认 20 行/自定义 tail/非法值 400", async () => {
+  const r = rig();
+  const out = await create(r, validBody({ command: "seq -f 'row-%g' 1 30; sleep 0.3" }));
+  assert.equal(out.ok, true);
+  if (!out.ok) return;
+  const id = out.info.id;
+  assert.ok(await waitFor(() => info(r, id).state === "completed"));
+  const mon = r.registry.get(id) as Monitor;
+  const tail5 = mon.readLogTail(5);
+  assert.equal(tail5.ok, true);
+  if (tail5.ok) {
+    assert.equal(tail5.text, "row-26\nrow-27\nrow-28\nrow-29\nrow-30");
+  }
+  const def = mon.readLogTail(20);
+  assert.ok(def.ok && def.ok && def.text.startsWith("row-11"), "default 20 rows");
+  const bad1 = mon.readLogTail(0);
+  assert.equal(bad1.ok, false);
+  if (!bad1.ok) assert.equal(bad1.status, 400);
+  const bad2 = mon.readLogTail(Number.NaN);
+  assert.equal(bad2.ok, false);
+});
+
+// ---------------------------------------------------------------------------
+// Review 修复回归（阶段 F）：TOCTOU 复检 / 收尾窗口守卫 / readLog 有界读
+
+test("session 上限并发竞态（Review 修复回归）：两 create 同过首查 → 复检恰一通过", async () => {
+  const r = rig();
+  for (let i = 0; i < 15; i++) {
+    const out = await create(r, validBody({ command: "sleep 60" }));
+    assert.equal(out.ok, true);
+  }
+  // gated mock：session 存活探测挂起，待两个并发 create 都停在 await 点后同时放行——
+  // 旧实现（仅首查）双双通过 → 17 个存活；复检版在同步段（spawn→add 无 await）裁决
+  let release!: () => void;
+  const gate = new Promise<void>((res) => (release = res));
+  const calls: Array<{ url: string }> = [];
+  const json = (status: number, body: unknown) =>
+    new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+  const fetchImpl = (async (url: string | URL | Request) => {
+    const u = String(url instanceof Request ? url.url : url);
+    calls.push({ url: u });
+    if (/\/api\/session\/[^/]+$/.test(u)) await gate; // 存活校验点挂起
+    if (u.endsWith("/api/info")) return json(200, { version: "2.2.5" });
+    if (u.includes("/synthetic")) return json(200, { data: { id: "msg_gate" } });
+    if (/\/api\/session\/[^/]+$/.test(u)) return json(200, { id: SESSION });
+    return json(404, {});
+  }) as typeof fetch;
+  const deps: MonitorDeps & { registry: TaskRegistry } = {
+    ...depsOf(r),
+    ocDeps: { fetchImpl, isAlive: () => true } satisfies OcDeps,
+  };
+  const pA = createTask(deps, validBody({ command: "sleep 60" }));
+  const pB = createTask(deps, validBody({ command: "sleep 60" }));
+  assert.ok(
+    await waitFor(() => calls.filter((c) => /\/api\/session\/[^/]+$/.test(c.url)).length >= 2),
+    "both creates parked at session liveness await",
+  );
+  release();
+  const [a, b] = await Promise.all([pA, pB]);
+  const winners = [a, b].filter((x) => x.ok);
+  assert.equal(winners.length, 1, `exactly one create wins (TOCTOU recheck), got ${a.ok}/${b.ok}`);
+  const loser = [a, b].find((x) => !x.ok)!;
+  assert.equal(loser.status, 400);
+  assert.equal(loser.error.code, "SESSION_TASK_LIMIT");
+  assert.equal(r.registry.aliveCountForSession(SESSION), 16);
+  // 清场
+  await Promise.all(r.registry.listInfos().map((t) => (r.registry.get(t.id) as Monitor).requestStop()));
+});
+
+test("收尾窗口守卫（Review 修复回归）：finalizing 中 keepalive/update → 409，不翻转状态", async () => {
+  const r = rig();
+  const out = await create(r, validBody({ command: "echo ready-g; sleep 30", coalesce_ms: 0 }));
+  assert.equal(out.ok, true);
+  if (!out.ok) return;
+  const id = out.info.id;
+  const mon = r.registry.get(id) as Monitor;
+  assert.ok(await waitFor(() => info(r, id).events_sent === 1), "bash fully up");
+  // 不 await：requestStop 入口同步段已置 finalizing；随后的 keepalive/update 落在
+  // "已收尾但 state 未落终态"窗口——旧实现按 running 放行（keepalive 还会翻转状态）
+  const stopP = mon.requestStop();
+  const midKa = mon.keepalive();
+  const midUp = await mon.updateMaxEvents(7);
+  assert.equal(midKa.ok, false, "keepalive rejected during finalizing window");
+  if (!midKa.ok) {
+    assert.equal(midKa.status, 409);
+    assert.equal(midKa.error.code, "TASK_TERMINAL");
+    assert.ok(String(midKa.error.error).includes("finalizing"), midKa.error.error);
+  }
+  assert.equal(midUp.ok, false, "update rejected during finalizing window");
+  if (!midUp.ok) assert.equal(midUp.error.code, "TASK_TERMINAL");
+  await stopP;
+  assert.equal(info(r, id).state, "stopped", "stop 照常完成，状态未被窗口内操作翻转");
+  assert.equal(info(r, id).max_events, 50, "窗口内的 update 未生效");
+});
+
+test("readLogTail 有界读（Review 修复回归）：巨型单行日志只读尾块，不整读", async () => {
+  const r = rig();
+  // 6MB 无换行单行（超 logTailMaxBytes=4MB 上界）——旧实现 readFileSync 整读返回 6MB
+  const out = await create(r, validBody({ command: "head -c 6291456 /dev/zero | tr '\\0' x; sleep 0.3" }));
+  assert.equal(out.ok, true);
+  if (!out.ok) return;
+  assert.ok(await waitFor(() => info(r, out.info.id).state === "completed", 10000));
+  const mon = r.registry.get(out.info.id) as Monitor;
+  const t = mon.readLogTail(20);
+  assert.equal(t.ok, true);
+  if (t.ok) {
+    assert.ok(t.text.length > 1_000_000, `still substantial tail, got ${t.text.length}`);
+    assert.ok(t.text.length <= LIMITS.logTailMaxBytes, `bounded read, got ${t.text.length}`);
+    assert.ok(/^x*$/.test(t.text), "content is the x tail (window starts mid-line)");
+  }
 });
 
 // ---------------------------------------------------------------------------
