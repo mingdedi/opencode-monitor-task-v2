@@ -302,7 +302,7 @@ test("monitor_manage 防呆：未知 action / 缺 monitor_id / update 缺 max_ev
   assert.deepEqual(h.calls, []);
 });
 
-test("monitor_manage 错误映射：404 → 结构化文本 + list 提示；4xx 终态拒绝透传", async () => {
+test("monitor_manage 错误映射：404 → 结构化文本 + list 提示；SESSION_NOT_FOUND 特化 hint；4xx 终态拒绝透传", async () => {
   const h = makeHarness();
   const tool = monitorManageTool(withEnsureServer(h));
   h.next.result = "err";
@@ -313,6 +313,19 @@ test("monitor_manage 错误映射：404 → 结构化文本 + list 提示；4xx 
   h.next.err = new MonitorApiError(409, { error: "task t1 is running; stop it first", code: "TASK_NOT_TERMINAL" });
   const out2 = await tool.execute({ action: "delete", monitor_id: "t1" }, CTX);
   assert.match(out2.content, /error: server 409: task t1 is running/);
+});
+
+test("monitor 错误映射：SESSION_NOT_FOUND（404）→ 目的地语义 hint，不再误导 action=list", async () => {
+  const h = makeHarness({ opencodeService: true });
+  h.next.result = "err";
+  h.next.err = new MonitorApiError(404, {
+    error: "session ses_x not found on port 49374 (404, or liveness check failed)",
+    code: "SESSION_NOT_FOUND",
+  });
+  const out = await monitorTool(withEnsureServer(h)).execute({ command: "true" }, CTX);
+  assert.match(out.content, /error: server 404: session ses_x not found/);
+  assert.match(out.content, /hint: the destination session must exist/);
+  assert.doesNotMatch(out.content, /action=list/); // 旧 bug：session 404 给任务 id 过期的提示
 });
 
 test("monitor_manage list 空态与行摘要", async () => {

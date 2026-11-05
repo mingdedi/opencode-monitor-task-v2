@@ -237,3 +237,26 @@ test("⑥ 就绪超时：子进程活但 service.json 不出现 → 超时诊断
   assert.match(String(caught), /pid=54321/);
   assert.match(String(caught), /check log for startup errors/);
 });
+
+test("⑦ rootDir 默认 = 模块位置推导的 monorepo 根（非 cwd——宿主进程内 cwd 是 HOME，真机冷启动 bug 的回归锚）", async () => {
+  const c = makeCase();
+  const seenRoots: string[] = [];
+  const fresh = svc({ id: "fresh-id" });
+  const sp = fakeSpawner((e) => {
+    writeFileSync(sfPath(e), JSON.stringify(fresh));
+  });
+  await ensureServer({
+    env: c.e,
+    fetchImpl: fakeFetch({ health: health() }),
+    spawnImpl: sp.impl,
+    isAlive: () => false,
+    pollIntervalMs: 5,
+    // 故意不注入 rootDir：默认路径必须自证
+    resolve: (rootDir) => {
+      seenRoots.push(rootDir);
+      return { kind: "source", command: "node", args: ["--import", "tsx", "packages/server/src/main.ts"], cwd: rootDir };
+    },
+  });
+  assert.equal(seenRoots.length, 1);
+  assert.match(seenRoots[0]!, /opencode-monitor-task-v2$/); // monorepo 根，而非 process.cwd()
+});

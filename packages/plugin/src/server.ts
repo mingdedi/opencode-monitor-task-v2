@@ -15,6 +15,8 @@
 
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync, unlinkSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { MonitorClient } from "../../shared/src/client.ts";
 import { envFromProcess, serverLogPath, serviceFilePath, type PathEnv } from "../../shared/src/paths.ts";
 import type { HealthInfo, ServiceFile } from "../../shared/src/types.ts";
@@ -34,6 +36,12 @@ const PROBE_TIMEOUT_MS = 1000;
 /** 就绪轮询窗口 / 间隔（§四纪律 3：就绪轮询 5s；verify-m1 同款节奏） */
 const READY_TIMEOUT_MS = 5000;
 const POLL_INTERVAL_MS = 200;
+
+/** 服务端运行时锚点：本模块（packages/plugin/src/server.ts）向上三级 = monorepo 根。
+ *  不能用 process.cwd()——插件运行于 opencode 宿主进程内，cwd 是宿主启动目录
+ *  （真机实测 = 用户 HOME），冷启动（spawn 路径）因此找不到 server 入口。
+ *  bundle 发布形态（M8）下插件包内布局同构，锚点随包根走；届时可经入口 shim 显式注入。 */
+const MODULE_ROOT: string = path.resolve(fileURLToPath(new URL("../../..", import.meta.url)));
 
 // ---------------------------------------------------------------------------
 // pid 探活（与 server/main.ts lockIsPidAlive 同语义：EPERM 按活、/proc Z 僵尸按死——
@@ -87,7 +95,7 @@ async function probe(svc: ServiceFile, fetchImpl: typeof fetch, timeoutMs: numbe
 export interface EnsureServerDeps {
   /** XDG 解析 + spawn 继承的 env（默认 process.env；测试注入指向临时目录） */
   env?: NodeJS.ProcessEnv;
-  /** resolveRuntime 锚点——插件包/项目根（默认 process.cwd()） */
+  /** resolveRuntime 锚点——插件包/项目根（默认从本模块位置推导；bundle 形态经入口注入） */
   rootDir?: string;
   /** health 探测传输层（测试注入） */
   fetchImpl?: typeof fetch;
@@ -144,7 +152,7 @@ export async function ensureServer(deps: EnsureServerDeps = {}): Promise<EnsureS
   }
 
   // --- 创建：解析运行时 → spawn（detached + ignore + env 显式传递 + unref）→ 就绪轮询 ---
-  const rt = resolve(deps.rootDir ?? process.cwd(), { env });
+  const rt = resolve(deps.rootDir ?? MODULE_ROOT, { env });
   const child = spawnImpl(rt.command, rt.args, { cwd: rt.cwd, stdio: "ignore", detached: true, env });
   child.unref();
   const deadline = Date.now() + readyTimeoutMs;

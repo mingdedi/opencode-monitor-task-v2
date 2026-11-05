@@ -89,10 +89,14 @@ async function guarded(body: () => Promise<ToolOutput>): Promise<ToolOutput> {
     return await body();
   } catch (err) {
     if (err instanceof MonitorApiError) {
+      // 按 body.code 特化 hint（SESSION_NOT_FOUND 的 404 与任务 404 语义不同——
+      // 前者是通知目的地不存在，后者才是任务 id 过期；真机测试发现的映射错位）
       const hint =
-        err.status === 404
-          ? "task id may be stale — call monitor_manage with action=list for current tasks"
-          : "server semantics: the error body above is authoritative (terminal-state refusals included)";
+        err.body?.code === "SESSION_NOT_FOUND"
+          ? "the destination session must exist and be reachable on the target opencode instance — call monitor_server to inspect instances, or pass the correct session_id"
+          : err.status === 404
+            ? "task id may be stale — call monitor_manage with action=list for current tasks"
+            : "server semantics: the error body above is authoritative (terminal-state refusals included)";
       return fail(`server ${err.status}: ${err.body?.error ?? err.message}`, hint);
     }
     throw err;
