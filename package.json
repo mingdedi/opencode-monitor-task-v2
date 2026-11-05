@@ -4,6 +4,14 @@
   "description": "Run long shell tasks alongside opencode agents — independent daemon + thin plugin, wake-ups via regex-filtered synthetic notifications",
   "type": "module",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+ssh://git@github.com/mingdedi/opencode-monitor-task-v2.git"
+  },
+  "bugs": {
+    "url": "https://github.com/mingdedi/opencode-monitor-task-v2/issues"
+  },
+  "homepage": "https://github.com/mingdedi/opencode-monitor-task-v2#readme",
   "keywords": [
     "opencode",
     "agent",
