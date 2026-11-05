@@ -12,14 +12,18 @@ export class MonitorApiError extends Error {
   }
 }
 
-/** 构造可选项（fetch 注入便于 TUI/测试替换传输层，默认全局 fetch） */
+/** 构造可选项（fetch 注入便于 TUI/测试替换传输层，默认全局 fetch；
+ *  signal 外部取消——插件工具 execute 的 context.signal 穿透，PLUGIN-PLAN §四纪律 5） */
 export interface MonitorClientOptions {
   fetchImpl?: typeof fetch;
+  /** 外部取消信号：与每次请求的内部超时并存（任一触发即中止该次 fetch） */
+  signal?: AbortSignal;
 }
 
 export class MonitorClient {
   private readonly auth: string;
   private readonly fetchImpl: typeof fetch;
+  private readonly externalSignal: AbortSignal | undefined;
 
   constructor(
     readonly baseUrl: string,
@@ -28,6 +32,7 @@ export class MonitorClient {
   ) {
     this.auth = "Basic " + Buffer.from(`monitor:${password}`).toString("base64");
     this.fetchImpl = opts.fetchImpl ?? fetch;
+    this.externalSignal = opts.signal;
   }
 
   private async request<T>(
@@ -37,6 +42,14 @@ export class MonitorClient {
   ): Promise<T> {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), opts.timeoutMs ?? 10_000);
+    // 外部 signal 桥接（超时与取消并存）：手动 addEventListener 而非 AbortSignal.any——
+    // 后者需 node ≥ 20.3，README 承诺 ≥ 20
+    const ext = this.externalSignal;
+    const onAbort = (): void => ctrl.abort();
+    if (ext) {
+      if (ext.aborted) ctrl.abort(); // 注册前已取消
+      else ext.addEventListener("abort", onAbort);
+    }
     try {
       const res = await this.fetchImpl(this.baseUrl + path, {
         method,
@@ -60,6 +73,7 @@ export class MonitorClient {
       return (await res.json()) as T;
     } finally {
       clearTimeout(timer);
+      ext?.removeEventListener("abort", onAbort);
     }
   }
 
