@@ -22,20 +22,29 @@ export function splitLines(pending: string, chunk: string): { lines: string[]; r
 }
 
 // ---------------------------------------------------------------------------
-// 清洗（v1 资产：ANSI CSI/OSC 剥离、trim、单行截断 2000 字符、空行丢弃）
+// 清洗（v1 资产全套继承：ANSI CSI/OSC/单字符 ESC 序列剥离、C0/C1 控制字符兜底、
+// trim、单行截断 2000 字符 + …[truncated] 标记、空行丢弃——2026-11-05 与 v1 clean.ts
+// 对照补齐：单 ESC 序列与控制字符不得进入通知正文；截断必须有可见标记）
 
 const ANSI_CSI = /\x1b\[[0-9;:<=>?]*[ -/]*[@-~]/g;
 const ANSI_OSC = /\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g;
+/** 单字符转义序列（ESC + 一个 final byte，如 \x1b7 DECSC / \x1bM RI）——v1 ANSI_SINGLE */
+const ANSI_SINGLE = /\x1b[@-Z\\-_]/g;
+/** 其余 C0/C1 控制字符（NUL/BEL/VT/DEL/8bit CSI 等；保留 \x09 TAB 与 \x0A LF——
+ *  LF 不会出现在行内（已分行），TAB 是可见语义字符）——v1 CONTROLS */
+const CONTROLS = /[\x00-\x08\x0b-\x1f\x7f\x9b]/g;
+/** 截断标记（v1 同款）：agent 必须能感知"此行被截断" */
+const TRUNCATION_MARKER = "…[truncated]";
 
 export function stripAnsi(line: string): string {
-  return line.replace(ANSI_CSI, "").replace(ANSI_OSC, "");
+  return line.replace(ANSI_OSC, "").replace(ANSI_CSI, "").replace(ANSI_SINGLE, "");
 }
 
 /** 清洗单行；清洗后为空返回 null（丢弃） */
 export function cleanLine(line: string): string | null {
-  const s = stripAnsi(line).trim();
+  const s = stripAnsi(line).replace(CONTROLS, "").trim();
   if (s === "") return null;
-  return s.length > LIMITS.lineMaxChars ? s.slice(0, LIMITS.lineMaxChars) : s;
+  return s.length > LIMITS.lineMaxChars ? s.slice(0, LIMITS.lineMaxChars) + TRUNCATION_MARKER : s;
 }
 
 // ---------------------------------------------------------------------------

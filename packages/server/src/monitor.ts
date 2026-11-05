@@ -431,6 +431,16 @@ export class Monitor {
     this.persistOffset();
   }
 
+  /** 冲刷未成行残余（v1 attached flushBuffer 资产，2026-11-05 对照补齐）：收尾路径
+   *  调用——无换行的临终输出强制成行进管线（preview/计数/过滤/投递语义与正常行
+   *  一致；deliverable=false 时只记账）。行安全 offset 随之前进到文件尾。 */
+  private flushPartialLine(deliverable: boolean): void {
+    const lines = this.tail.flushPending();
+    if (lines.length === 0) return;
+    this.ingestLines(lines, deliverable);
+    this.persistOffset();
+  }
+
   /** coalesce 窗口到期 flush（tumbling；到期判定由本 tick 驱动——SERVER-PLAN §一） */
   private flushCoalesceIfDue(): void {
     if (this.coalescer === null || !this.coalescer.due(this.now())) return;
@@ -638,6 +648,7 @@ export class Monitor {
     this.stopTimer();
     try {
       this.pump(); // 进程已死，log 不再增长：此轮即读尽
+      this.flushPartialLine(true); // 无换行尾行成行（v1 flushBuffer 资产——临终输出不丢）
       this.flushCoalesceNow(); // coalesce 窗内余量：尾批入链（lifecycle 之前，v1 资产）
     } catch (err) {
       this.safeLog(`task ${this.id} final pump error: ${String(err)}`);
@@ -650,7 +661,18 @@ export class Monitor {
     this.emitLifecycle();
     this.safeWriteMeta();
     this.tail.close();
-    this.safeLog(`task ${this.id} finished: ${this.meta.state} exit=${code}`);
+    // 残留组清空（2026-11-05 裁定：任务结束=组必然清空，"连带完整 kill"）：wrapper 死后
+    // 组内可能残留命令自启的后台子进程（引号藏 & 逃过命令校验）——不清则它们成为
+    // 无主进程：无人看护、无人计数，且 sweeper 删目录后继续写 unlinked fd，磁盘滞留
+    // 至进程死。killTree 两档与 stop 同款；组已空时 ESRCH 即返（无害、零开销）。
+    // 放 emitLifecycle 之后：通知链先走，清组的 200ms 等待与投递并行
+    const swept = await killTree(this.pgid).catch((err: unknown) => {
+      this.safeLog(`task ${this.id} residual group sweep error: ${String(err)}`);
+      return null;
+    });
+    this.safeLog(
+      `task ${this.id} finished: ${this.meta.state} exit=${code}${swept !== null ? ` (residual group swept, tier=${swept})` : ""}`,
+    );
   }
 
   /** max_events 即停即杀（PLAN §3.3）：第 max_events 条 wake 成功送达回调触发。
@@ -672,8 +694,15 @@ export class Monitor {
     this.finalizing = true;
     this.stopTimer();
     try {
-      this.flushCoalesceNow(); // 窗内余量仍属 agent（达顶批会被 dispatchWake 计 dropped）
+      // v1 attached 收尾冲刷资产（flushBuffer/close 路径）在文件即管道唯一模式下的移植
+      // （2026-11-05 对照补齐）：杀组前读尽已成行内容并冲残余；杀组后再读一轮——
+      // SIGTERM trap 的临终遗言同样属 agent，经 deliverChain 保序先于 lifecycle 送达
+      this.pump();
+      this.flushPartialLine(true);
       const tier = await killTree(this.pgid);
+      this.pump(); // 临终输出（trap 遗言）：进程已死，此轮读尽
+      this.flushPartialLine(true);
+      this.flushCoalesceNow(); // 窗内余量（含临终行）入链
       const raw = await this.readExitWithGrace();
       const code = exitCodeFromRaw(raw);
       this.meta.state = "stopped";
@@ -830,8 +859,13 @@ export class Monitor {
     this.finalizing = true;
     this.stopTimer();
     try {
+      // 收尾冲刷（v1 flushBuffer 资产）：杀前读尽+冲残余，杀后读临终遗言——silent 语义
+      // （无人可投，只记账不投递，计数/preview 与正常管线一致）
       this.pumpSilent();
+      this.flushPartialLine(false);
       const tier = await killTree(this.pgid);
+      this.pumpSilent();
+      this.flushPartialLine(false);
       const raw = await this.readExitWithGrace();
       const code = exitCodeFromRaw(raw);
       this.meta.state = "orphaned";

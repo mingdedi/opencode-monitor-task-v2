@@ -79,6 +79,18 @@ export class LogTail {
     return Buffer.byteLength(this.pending);
   }
 
+  /** 强制未成行残余成行（v1 attached flushBuffer 资产，2026-11-05 对照补齐）：
+   *  进程死亡/停止收尾路径调用——无换行的临终输出（printf 无 \n、被杀进程的
+   *  半行缓冲）不得丢失。字节已在前次 poll 的 bytesConsumed 计入，此处只成行；
+   *  调用后 pendingBytes()=0（last_offset 前进到文件尾）。幂等：空残余返回 []。 */
+  flushPending(): string[] {
+    if (this.pending === "") return [];
+    const rest = this.pending;
+    this.pending = "";
+    const cleaned = cleanLine(rest);
+    return cleaned !== null ? [cleaned] : [];
+  }
+
   close(): void {
     try {
       closeSync(this.fd);

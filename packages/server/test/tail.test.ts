@@ -89,8 +89,21 @@ test("大 chunk：超过单次读缓冲（64KB）循环读尽；无换行长行�
   appendFileSync(logPath, big);
   const r = t.poll();
   assert.equal(r.lines.length, 1);
-  assert.equal(r.lines[0]!.length, LIMITS.lineMaxChars, "cleanLine 单行截断语义");
+  assert.ok(r.lines[0]!.startsWith("y".repeat(LIMITS.lineMaxChars)), "cleanLine 单行截断语义");
+  assert.ok(r.lines[0]!.endsWith("…[truncated]"), "截断标记（v1 资产）");
   assert.equal(r.bytesConsumed, Buffer.byteLength(big));
+  t.close();
+});
+
+test("flushPending：无换行残余强制成行（v1 attached flushBuffer 资产——临终输出不丢）", async () => {
+  const t = new LogTail(newLog());
+  appendFileSync(logPath, "line1\npartial-no-newline");
+  const r = t.poll();
+  assert.deepEqual(r.lines, ["line1"]); // 残余不成行
+  assert.ok(t.pendingBytes() > 0);
+  assert.deepEqual(t.flushPending(), ["partial-no-newline"]); // 强制成行
+  assert.equal(t.pendingBytes(), 0); // 清空（last_offset 前进到文件末）
+  assert.deepEqual(t.flushPending(), []); // 幂等：空残余无行
   t.close();
 });
 
@@ -100,7 +113,8 @@ test("64KB 软换行（SERVER-PLAN 阶段 E）：未成行残余超阈值强制�
   appendFileSync(logPath, "z".repeat(LIMITS.softWrapBytes + 1));
   const r1 = t.poll();
   assert.equal(r1.lines.length, 1, "残余超限强制成行");
-  assert.equal(r1.lines[0]!.length, LIMITS.lineMaxChars, "软换行行同样过 cleanLine 截断");
+  assert.ok(r1.lines[0]!.startsWith("z".repeat(LIMITS.lineMaxChars)), "软换行行同样过 cleanLine 截断");
+  assert.ok(r1.lines[0]!.endsWith("…[truncated]"), "截断标记（v1 资产）");
   assert.equal(t.pendingBytes(), 0, "软换行后 pending 清空（该段已消费）");
   t.close();
 });
@@ -113,7 +127,10 @@ test("64KB 软换行边界：恰 64KB 不触发，后续字节仍未成行", asy
   assert.equal(t.pendingBytes(), LIMITS.softWrapBytes);
   appendFileSync(logPath, "b\n"); // 追加后成行：软换行段 + 新字符合成一行
   const r2 = t.poll();
-  assert.deepEqual(r2.lines, ["a".repeat(LIMITS.softWrapBytes) + "b"].map((l) => l.slice(0, LIMITS.lineMaxChars)));
+  const expected = "a".repeat(LIMITS.softWrapBytes) + "b";
+  assert.equal(r2.lines.length, 1);
+  assert.ok(r2.lines[0]!.startsWith(expected.slice(0, LIMITS.lineMaxChars)), "前 2000 字符保留");
+  assert.ok(r2.lines[0]!.endsWith("…[truncated]"), "截断标记（v1 资产）");
   t.close();
 });
 

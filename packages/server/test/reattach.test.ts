@@ -283,6 +283,49 @@ test("死收尾：缺席期间自然退出 → 终态 + exit + 一条合并结�
   assert.equal(syntheticCalls(r).length, 1);
 });
 
+test("死收尾残余行：缺席期间的无换行尾行进结局摘要（v1 flushBuffer 资产在 reattach 死路的移植）", async () => {
+  const r = rig();
+  const { id } = await residue(r, 'echo gone-1; printf "half-line-no-nl"');
+  const metaBefore = readMeta(r.env, id)!;
+  assert.ok(
+    await waitFor(() => !isTaskProcessAlive({ pid: metaBefore.pid!, startTime: metaBefore.proc_start_time })),
+    "task should exit while unobserved",
+  );
+  const res = await scanAndReclaim(r.deps);
+  assert.equal(res.finalized, 1);
+
+  // 旧行为：残余不成行 → lines_scanned=1、摘要 preview 无尾行；新行为：成行并入摘要
+  const info = listed(r).find((t) => t.id === id)!;
+  assert.equal(info.lines_scanned, 2, "无换行尾行必须成行计数");
+  assert.ok(await waitFor(() => syntheticCalls(r).length === 1));
+  const body = textOf(syntheticCalls(r)[0]!);
+  assert.ok(body.includes("half-line-no-nl"), `摘要 preview 应含尾行，got: ${body}`);
+});
+
+test("死路残留组清空（2026-11-05 裁定：任务结束=组必然清空）：崩溃期间脱管的孙进程在 finalizeDeadTask 被击杀", async () => {
+  const r = rig();
+  const { meta } = await residue(r, 'bash -c "sleep 30 & exit 0"; echo gone'); // 双引号内 & 豁免校验
+  assert.ok(
+    await waitFor(() => !isTaskProcessAlive({ pid: meta.pid!, startTime: meta.proc_start_time })),
+    "task should exit while unobserved",
+  );
+  // wrapper 已死、组内残留 sleep 30（无主状态）——旧行为：finalizeDeadTask 不杀，组存活 30s；
+  // 新行为：killTree 两档清空
+  const res = await scanAndReclaim(r.deps);
+  assert.equal(res.finalized, 1);
+  const groupAlive = (): boolean => {
+    try {
+      process.kill(-meta.pgid!, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  assert.ok(await waitFor(() => !groupAlive()), "崩溃窗口脱管的残留进程组应被清空");
+  const info = listed(r).find((t) => t.id === meta.id)!;
+  assert.equal(info.state, "completed", "残留清杀不改变任务结局（exit 0）");
+});
+
 test("parked：log 丢失的活任务 → 认领失败标 parked、列表可见、进程不杀（§2.9-5）", async () => {
   const r = rig();
   const { id } = await residue(r, "sleep 3");

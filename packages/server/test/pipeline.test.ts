@@ -58,10 +58,27 @@ test("cleanLine：trim + 空行（含 ANSI 剥离后变空）→ null", () => {
   assert.equal(cleanLine("\x1b[0m \x1b[2K"), null);
 });
 
-test("cleanLine：超长行截断到 2000 字符", () => {
+test("cleanLine：超长行截断带 …[truncated] 标记（v1 资产继承——agent 可感知截断）", () => {
   const long = "x".repeat(LIMITS.lineMaxChars + 500);
-  const cleaned = cleanLine(long);
-  assert.equal(cleaned!.length, LIMITS.lineMaxChars);
+  const cleaned = cleanLine(long)!;
+  assert.ok(cleaned.startsWith("x".repeat(LIMITS.lineMaxChars)), "前 2000 字符保留");
+  assert.ok(cleaned.endsWith("…[truncated]"), "截断标记可见");
+  // 不超长：无标记
+  assert.equal(cleanLine("short"), "short");
+});
+
+test("cleanLine：单字符 ESC 序列剥离（v1 ANSI_SINGLE 资产继承——final byte 范围 @-Z\\^-_）", () => {
+  assert.equal(cleanLine("before\x1bMafter"), "beforeafter"); // RI 反向换行（M ∈ @-Z）
+  assert.equal(cleanLine("\x1bAup\x1bBdown"), "updown"); // CUU/CUD
+  // \x1b7（DECSC，"7" 不在 @-Z 字母区间）不在 ANSI_SINGLE 范围——由 CONTROLS
+  // 兜底剥掉 ESC 本身，数字字面量保留（v1 同款行为，非缺陷）
+  assert.equal(cleanLine("\x1b7save"), "7save");
+});
+
+test("cleanLine：C0/C1 控制字符剥离（v1 CONTROLS 资产继承）——二进制噪音不进通知正文", () => {
+  assert.equal(cleanLine("a\x00b\x07c\x0bd\x7fe\x9bf"), "abcdef");
+  // 全控制字符行 → 剥净后为空 → null
+  assert.equal(cleanLine("\x07\x07"), null);
 });
 
 // ---------------------------------------------------------------------------

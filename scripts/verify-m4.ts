@@ -158,7 +158,10 @@ async function scenario1_twoStage(client: MonitorClient): Promise<void> {
   const sid = await newProbeSession("omt-verify-m4-1");
   try {
     const t = await client.createTask({
-      command: "sleep 120",
+      // 纯内建忙循环（无前台外部子进程）：TERM 后无 "已终止/Terminated" 作业回声行——
+      // 杀后冲刷语义会读回声行并占 wake 额度，破坏 sent=0 断言（回声也是真实输出，
+      // 语义上送达正确；此处为断言确定性消除回声，与 monitor.test 同款处理）
+      command: "while :; do :; done",
       opencode_port: ocPort,
       session_id: sid,
       directory: XDG,

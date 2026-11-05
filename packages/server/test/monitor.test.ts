@@ -129,6 +129,51 @@ const textOf = (c: { body: Record<string, unknown> | null }) => String(c.body?.t
 // ---------------------------------------------------------------------------
 // 闭环与终态
 
+test("临终输出不丢（v1 attached flushBuffer 资产继承）：自然退出时无换行尾行强制成行计数", async () => {
+  const r = rig();
+  const out = await create(r, validBody({ command: 'printf "tail-no-newline"' })); // 无换行结尾
+  assert.equal(out.ok, true);
+  if (!out.ok) return;
+  const id = out.info.id;
+  assert.ok(await waitFor(() => info(r, id).state === "completed"), "should complete");
+  // 旧行为：残余不成行 → lines_scanned=0、无 wake；新行为：成行进管线（直通命中 → wake 送达）
+  const final = info(r, id);
+  assert.equal(final.lines_scanned, 1, "无换行尾行必须成行（v1 flushBuffer 语义）");
+  const syn = syntheticCalls(r);
+  assert.ok(syn.some((c) => textOf(c).includes("tail-no-newline")), "尾行内容必须到达 agent");
+});
+
+test("临终输出不丢（v1 attached 收尾冲刷继承）：stop 路径 TERM trap 遗言在 lifecycle 前送达", async () => {
+  const r = rig();
+  const out = await create(r, validBody({
+    command: 'trap "echo caught-term" TERM; echo armed; while :; do sleep 0.1; done',
+  }));
+  assert.equal(out.ok, true);
+  if (!out.ok) return;
+  const id = out.info.id;
+  const mon = r.registry.get(id) as Monitor;
+  assert.ok(await waitFor(() => syntheticCalls(r).some((c) => textOf(c).includes("armed"))), "armed 应送达");
+  await mon.requestStop();
+  assert.equal(info(r, id).state, "stopped");
+  // 旧行为：杀组后无人再读（timer 已停 + 无 final pump）→ trap 遗言丢失；
+  // 新行为：杀后冲刷读走，且经 deliverChain 保序先于 lifecycle。
+  // waitFor 而非立即断言：lifecycle 在投递链上异步送达（F 阶段教训——await
+  // requestStop 返回 ≠ fetch 已发出）。注：TERM 杀 sleep 0.1 时 bash 的作业回声行
+  // （"已终止/Terminated"）与遗言同窗合批送达——杀的回声也是真实输出，一并属 agent
+  assert.ok(
+    await waitFor(() => syntheticCalls(r).some((c) => textOf(c).includes("caught-term"))),
+    `trap 遗言必须送达，got: ${syntheticCalls(r).map(textOf).join(" | ")}`,
+  );
+  assert.ok(
+    await waitFor(() => syntheticCalls(r).some((c) => textOf(c).includes("finished: stopped"))),
+    "lifecycle 应送达",
+  );
+  const texts = syntheticCalls(r).map(textOf);
+  const idxLast = texts.findIndex((t) => t.includes("caught-term"));
+  const idxLife = texts.findIndex((t) => t.includes("finished: stopped"));
+  assert.ok(idxLife > idxLast, "遗言先于 lifecycle（deliverChain 保序）");
+});
+
 test("直通闭环：echo 行 → wake 信封 → 退出 → lifecycle 信封（保序/内容/幂等 id 唯一）", async () => {
   const r = rig();
   const out = await create(r, validBody({ command: "echo hello-m; sleep 0.2", description: "mon-desc" }));
@@ -189,13 +234,40 @@ test("failed 终态：exit 7 → failed + exit_info", async () => {
   assert.ok(lc !== undefined && lc.includes("failed"), String(lc));
 });
 
+test("completed 后残留组清空（2026-11-05 裁定：任务结束=组必然清空，killTree 两档）：引号藏 & 的孙进程被击杀，磁盘泄漏面关闭", async () => {
+  const r = rig();
+  // 双引号内的 & 豁免命令校验（v1 M3.6 掩蔽语义）：内层 bash 后台 sleep 30 后立即
+  // exit 0 → wrapper 记 exit 0 正常 completed，但 sleep 30 脱管残留组内（v1 R3-⑤场景）
+  const out = await create(r, validBody({ command: 'bash -c "sleep 30 & exit 0"; echo done' }));
+  assert.equal(out.ok, true);
+  if (!out.ok) return;
+  const pgid = out.info.pid!; // detached 自成进程组：pgid === wrapper pid
+  const groupAlive = (): boolean => {
+    try {
+      process.kill(-pgid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  assert.ok(await waitFor(() => info(r, out.info.id).state === "completed"), "should complete");
+  // 旧行为：completed 不清组 → sleep 30 残留组内存活 30s（sweeper 删目录后写 unlinked fd）；
+  // 新行为：finalize 对残留组 killTree 两档 → 组必然清空
+  assert.ok(await waitFor(() => !groupAlive()), "残留进程组应被清空（killTree on finalize）");
+  const final = info(r, out.info.id);
+  assert.deepEqual(final.exit_info, { code: "0", reason: "exited" }, "残留清杀不改变已收集的任务结局");
+  assert.equal(final.state, "completed");
+});
+
 test("max_events=1 直通：首条送达即停即杀，lifecycle 不占额仍投递（E 语义升级版）", async () => {
   const r = rig();
   // D 版语义是"达顶停发不杀"；E 接入即停即杀（PLAN §3.3）后：首条送达 → SIGTERM
-  // → stopped。coalesce_ms: 0 显式直通（默认 500ms 窗口会把行合批，本测试专测达顶路径）
+  // → stopped。coalesce_ms: 0 显式直通（默认 500ms 窗口会把行合批，本测试专测达顶路径）。
+  // 命令用纯内建忙循环（无前台外部子进程）：TERM 直接杀 wrapper bash 本体，
+  // 无 "Terminated" 作业回声行——保 dropped=0 断言的确定性（杀后冲刷语义会读回声行）
   const out = await create(
     r,
-    validBody({ command: "echo first-m; sleep 8", max_events: 1, coalesce_ms: 0 }),
+    validBody({ command: "echo first-m; while :; do :; done", max_events: 1, coalesce_ms: 0 }),
   );
   assert.equal(out.ok, true);
   if (!out.ok) return;
@@ -497,8 +569,9 @@ test("窗口到期 flush：行到达后进程仍活，窗口到期由 tick 驱�
 test("idle 两段式全路径：静默 → idle + 裁决通知（queue/不占额）→ 宽限到期自动杀", async () => {
   const r = rig();
   // 静默 1.2s：idle_timeout_ms=400 → t≈400 转 idle + 裁决通知；宽限 400ms → t≈800 自动杀。
-  // 命令活 5s 保证各阶段按裁决而非自然死亡推进
-  const out = await create(r, validBody({ command: "sleep 5", idle_timeout_ms: 400, coalesce_ms: 0 }));
+  // 命令活 5s 保证各阶段按裁决而非自然死亡推进。纯内建忙循环：无输出（idle 计时从
+  // spawn 起武装）且 TERM 后无作业回声行——保 events_sent=0 断言的确定性（杀后冲刷语义）
+  const out = await create(r, validBody({ command: "while :; do :; done", idle_timeout_ms: 400, coalesce_ms: 0 }));
   assert.equal(out.ok, true);
   if (!out.ok) return;
   const id = out.info.id;

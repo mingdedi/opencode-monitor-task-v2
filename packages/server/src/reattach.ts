@@ -18,7 +18,7 @@ import { LIMITS, buildEnvelope } from "@omt/shared";
 import { makeMatcher } from "./pipeline.ts";
 import { INSTANCE_EPOCH, Monitor, reasonFromCode, type MonitorDeps } from "./monitor.ts";
 import { deliverNotification } from "./deliver.ts";
-import { exitCodeFromRaw, isTaskProcessAlive } from "./spawner.ts";
+import { exitCodeFromRaw, isTaskProcessAlive, killTree } from "./spawner.ts";
 import { LogTail } from "./tail.ts";
 import {
   appendPending,
@@ -142,10 +142,14 @@ function summarizeMissed(env: ReattachDeps["env"], meta: TaskMeta): MissedSummar
   try {
     tail = new LogTail(paths.log, meta.last_offset);
     const r = tail.poll();
+    // 无换行残余强制成行（v1 flushBuffer 资产在死路的移植，2026-11-05 对照补齐）：
+    // 任务死前的最后半行（printf 无 \n / 被杀进程的半行缓冲）同样属于结局摘要。
+    // 任务已死、log 静态，flush 后无重读顾虑
+    const lines = [...r.lines, ...tail.flushPending()];
     const matcher = makeMatcher(meta.pattern, meta.wake_mode);
     let matched = 0;
     const preview: string[] = [];
-    for (const line of r.lines) {
+    for (const line of lines) {
       // preview 收集前置于 pattern 过滤（§2.5 末根治点——死路同款语义）
       preview.push(line);
       if (preview.length > LIMITS.previewLines) preview.shift();
@@ -153,7 +157,7 @@ function summarizeMissed(env: ReattachDeps["env"], meta: TaskMeta): MissedSummar
       if (m === null || m.matched) matched++;
     }
     const offset = meta.last_offset + r.bytesConsumed - tail.pendingBytes();
-    return { lines: r.lines.length, matched, preview, newOffset: Math.max(meta.last_offset, offset) };
+    return { lines: lines.length, matched, preview, newOffset: Math.max(meta.last_offset, offset) };
   } catch {
     return { lines: 0, matched: 0, preview: [], newOffset: meta.last_offset };
   } finally {
@@ -163,6 +167,16 @@ function summarizeMissed(env: ReattachDeps["env"], meta: TaskMeta): MissedSummar
 
 async function finalizeDeadTask(deps: ReattachDeps, metaInput: TaskMeta): Promise<void> {
   const meta = metaInput;
+  // 残留组清空（2026-11-05 裁定：任务结束=组必然清空，"连带完整 kill"）：崩溃期间
+  // wrapper 已死但组内可能残留命令自启的后台子进程——重启后无人看护它们（真·无主
+  // 进程），且 sweeper 删目录后写 unlinked fd 磁盘滞留。组已空时 killTree 零开销
+  if (meta.pgid) {
+    try {
+      await killTree(meta.pgid);
+    } catch (err) {
+      deps.log(`task ${meta.id} reattach: residual group sweep error (${String(err).slice(0, 60)})`);
+    }
+  }
   const missed = summarizeMissed(deps.env, meta);
   const raw = readExitFile(deps.env, meta.id);
   const code = exitCodeFromRaw(raw);
