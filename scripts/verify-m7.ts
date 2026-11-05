@@ -364,7 +364,7 @@ async function scenario6_doubleSpawnRefusal(): Promise<void> {
     await sleep(600);
   }
 
-  // 假 health：响应 version 0.0.9（与插件期望 0.1.0 的 major.minor 都不同）
+  // 假 health：响应 version 0.0.9（与插件期望的真实包版本 major.minor 都不同——不依赖具体版本号）
   const fake = createServer((req, res) => {
     res.writeHead(200, { "content-type": "application/json" });
     res.end(JSON.stringify({ id: "fake", version: "0.0.9", uptime_s: 1, tasks_alive: 0, tasks_total: 0, reattach: null, opencode_instances: [], log_bytes: 0 }));

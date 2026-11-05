@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        node: [20, 22]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - run: npm install
+      - run: npm run typecheck
+      - run: npm test
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install
+      - run: npm run build
+      # bundle 冒烟:隔离 XDG 直接起 bundle,health 探测 + 优雅退出
+      - run: |
+          XDG=$(mktemp -d)
+          XDG_STATE_HOME=$XDG/state XDG_DATA_HOME=$XDG/data node dist/server.mjs &
+          pid=$!
+          sleep 1.5
+          svc=$XDG/state/opencode-monitor-task/service.json
+          node -e "
+            const fs = require('fs');
+            const svc = JSON.parse(fs.readFileSync(process.argv[1], 'utf8'));
+            const auth = 'Basic ' + Buffer.from('monitor:' + svc.password).toString('base64');
+            fetch(svc.url + '/api/health', { headers: { authorization: auth } })
+              .then(r => r.json())
+              .then(h => {
+                if (!h.version) { console.error('health: no version'); process.exit(1); }
+                console.log('bundle smoke: health ok, version', h.version);
+              })
+              .catch(e => { console.error('health failed:', e); process.exit(1); });
+          " "$svc"
+          kill -TERM $pid
+          wait $pid
+          test ! -e "$svc"   # 优雅退出后 service.json 自清
+          echo "bundle smoke: graceful exit, service.json cleaned"
+
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install
+      # 发布内容守门:pack 产物里不得出现 test/scripts/服务端源码/私有计划文档
+      # （严格模式:只取 "npm notice <size> <path>" 行——prepack 日志行会伪满足宽松 grep）
+      - run: |
+          npm pack --dry-run 2>&1 | grep -E "^npm notice [0-9]" | awk '{print $NF}' | sort > files.txt
+          cat files.txt
+          ! grep -qE '^(test/|scripts/|packages/server/|packages/.*/test/|.*PLAN.*\.md)' files.txt
+          grep -qx 'dist/server.mjs' files.txt
+          grep -qx 'index.ts' files.txt
+          grep -qx 'tui.ts' files.txt
+          grep -qx 'packages/plugin/src/tools.ts' files.txt
+          grep -qx 'packages/shared/src/client.ts' files.txt

@@ -11,7 +11,11 @@ import { envFromProcess, serverLogPath, serviceFilePath, stateDir } from "../../
 import type { HealthInfo, ServiceFile } from "../../shared/src/types.ts";
 import type { RuntimeResolution, SpawnedProcess } from "../src/types.ts";
 
-const COMPAT_VERSION = "0.1.0"; // 与 packages/plugin/package.json 对齐（versionCompatible：major.minor）
+// 与 packages/plugin/package.json 对齐（versionCompatible：major.minor）——动态读取：
+// 版本升级时假件自动跟随（M8 曾因统一 2.0.0 与硬编码 0.1.0 错位而 4 分支齐红）
+const COMPAT_VERSION: string = (
+  JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string }
+).version;
 
 let xdgRoot: string;
 const env = (): NodeJS.ProcessEnv => {

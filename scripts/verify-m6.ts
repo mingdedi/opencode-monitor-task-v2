@@ -30,7 +30,8 @@ import { createFeed, isPidAliveViaSignal, type FeedDeps, type FeedSnapshot } fro
 import { renderLines, PANEL_WIDTH } from "../src/tui/format.ts";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const MAIN_TS = path.join(ROOT, "packages", "server", "src", "main.ts");
+import { resolveServerEntry } from "./lib/server-entry.ts";
+const entry = resolveServerEntry(ROOT);
 const XDG = mkdtempSync("/tmp/opencode/omt-verify-m6-");
 const STATE = `${XDG}/state`;
 
@@ -55,7 +56,7 @@ const children: ChildProcess[] = [];
 // 真实 opencode 共享服务的 service.json 路径（注册进服务端白名单，同 verify-m4）
 const realServicePath = opencodeServicePath();
 function spawnServer(): ChildProcess {
-  const child = spawn(process.execPath, ["--import", "tsx", MAIN_TS, "--opencode-state", realServicePath], {
+  const child = spawn(entry.command, [...entry.baseArgs, "--opencode-state", realServicePath], {
     cwd: ROOT,
     env: { ...process.env, XDG_STATE_HOME: `${XDG}/state`, XDG_DATA_HOME: `${XDG}/data` },
     stdio: "ignore",

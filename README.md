@@ -43,6 +43,73 @@ hot-reloads; tasks run in their own process groups with file-based pipes
 - opencode ≥ 2.2 (shared background service; `--standalone` / remote
   `--server` modes are not supported)
 
+## Installation
+
+The daemon ships as a single self-contained bundle (`dist/server.mjs`, built
+with esbuild — the `@opencode-ai/sdk` client and all workspace sources are
+packed in), so the published package has no runtime dependencies beyond a
+Node.js ≥ 20 executable. The plugin entry files (`index.ts` / `tui.ts` and
+their TypeScript sources) are consumed directly by the opencode host, which
+transpiles TypeScript itself.
+
+```sh
+npm install -g opencode-monitor-task
+ln -sfn "$(npm root -g)/opencode-monitor-task" ~/.config/opencode/plugins/opencode-monitor-task
+```
+
+The host discovers both parts from the package root (the `index.ts` server
+part with the MCP tools, the `tui.ts` panel). Remove the symlink to
+uninstall; re-run the `ln -sfn` line after upgrading to repoint the link.
+No `npm install` step is needed inside the plugin directory — nothing there
+requires a `node_modules` to exist.
+
+### How the daemon is launched
+
+Every tool call runs daemon discovery first (1s health probe against
+`$XDG_STATE_HOME/opencode-monitor-task/service.json`) and starts one if
+needed. The launcher (`resolveRuntime` in `packages/plugin/src/runtime.ts`)
+never assumes the host process is Node — the opencode CLI is a bun-compiled
+binary — and instead resolves, in order:
+
+1. `OMT_SERVER_BIN` — a full server command, trusted as-is (CI/diagnostics)
+2. `OMT_NODE` — a specific node executable (still version-checked, ≥ 20)
+3. `node` on `PATH` — combined with the server form found in the package:
+   `dist/server.mjs` (bundle, published form) if present, otherwise
+   `packages/server/src/main.ts` via tsx (source, development form)
+
+If all of that fails you get a structured diagnostic listing every attempt
+plus the host's `PATH` verbatim — the single most useful piece of information
+when node lives in an fnm/nvm multishell path that a non-shell host didn't
+inherit. The daemon is never started at plugin load: on-demand is the only
+lifecycle.
+
+### A note on pattern regexes (catastrophic backtracking)
+
+The `pattern` you pass to `monitor` is compiled and executed **synchronously
+on the daemon's event loop** against every scanned line (up to 2000 chars
+after cleaning). That is deliberate — it keeps matching deterministic and
+the output pipeline simple — and it is also the one input that can stall the
+*entire daemon*, not just your task: a pathological regex such as
+`(a+)+$`, `(a|aa)+$`, or deeply nested quantifiers over overlapping
+alternations can exhibit exponential backtracking on modest inputs, freezing
+notification delivery, HTTP handling, and the idle adjudication of every
+other task the daemon watches.
+
+This is documented rather than mechanically prevented: rejected-regex
+subsets (RE2-style) would refuse many legitimate patterns, and per-line
+match timeouts would add worker machinery out of proportion to the threat.
+Within the threat model an agent only starves itself — the daemon runs as
+your user, same as the agent's own shell tool — but the blast radius is
+*all tasks on that daemon*, so:
+
+- keep patterns anchored and specific; prefer a few alternations of literals
+  over nested quantifiers;
+- never build patterns from untrusted input;
+- if a monitor task makes the daemon unresponsive, `kill` the daemon
+  (`pkill -f 'dist/server.mjs'` or the pid from service.json) — task
+  processes keep running in their own groups and get re-attached when the
+  daemon restarts.
+
 ## Plugin tools (MCP)
 
 The plugin registers three tools with the opencode host (server part entry
@@ -79,16 +146,30 @@ Semantics worth knowing:
 npm install
 npm run typecheck
 npm test
+npm run build                              # esbuild bundle → dist/server.mjs
 node --import tsx scripts/fetch-spec.ts      # refresh OpenAPI snapshot
 node --import tsx scripts/probe-synthetic.ts # verify runtime semantics
+node --import tsx scripts/verify-m1.ts       # discovery/spawn/race acceptance (M1)
+node --import tsx scripts/verify-m2-pre.ts   # synthetic contract probe (M2-pre)
+node --import tsx scripts/verify-m2.ts       # minimal closed loop (M2)
+node --import tsx scripts/verify-m4.ts       # idle adjudication + management (M4)
+node --import tsx scripts/verify-m5.ts       # crash recovery / reattach (M5)
 node --import tsx scripts/verify-m6.ts       # TUI dataflow acceptance (M6)
 node --import tsx scripts/verify-m7.ts       # plugin-tools acceptance (M7)
+node --import tsx scripts/verify-m8.ts       # permission audit acceptance (M8)
+node --import tsx scripts/storm-sim.ts       # notification-storm simulation (M3 payload)
 ```
+
+All `verify-*` and `storm-sim` scripts resolve the server form the same way
+the plugin does (`scripts/lib/server-entry.ts`): with `dist/server.mjs`
+present they exercise the **bundle**, without it the **source** form — the M8
+gate requires the full set green in both forms (same criteria, zero drift).
 
 ### Local install (development)
 
-Until this is published, load the plugin from a checkout by symlinking it into
-opencode's plugin discovery directory — one line, no script needed:
+To load the plugin from a checkout instead of the published package,
+symlink it into opencode's plugin discovery directory — one line, no script
+needed:
 
 ```sh
 ln -sfn "$PWD" ~/.config/opencode/plugins/opencode-monitor-task
@@ -113,6 +194,19 @@ service discovery (`$XDG_STATE_HOME/opencode-monitor-task/service.json`,
 mode 600). Task notifications are wrapped in escaped envelopes; still, do not
 monitor streams that untrusted parties can write to — monitored output is
 delivered into your agent's context.
+
+File-permission posture (audited by `scripts/verify-m8.ts`, both source and
+bundle forms): state and data roots are 0700 (`~/.local/state/opencode-monitor-task/`,
+`~/.local/share/opencode-monitor-task/`), `service.json` / lock / `meta.json`
+/ task logs are 0600, and `meta.json` never contains credentials — the
+opencode password is re-read from the live service.json on every delivery.
+The daemon's own log records ids, counters and errors, never command text.
+
+Command validation (trailing `&`, `$(...)`, backticks, …) is a guard rail,
+not a security boundary: the daemon intentionally runs arbitrary bash as
+your user, exactly like the agent's own shell tool. The regex caveat above
+is the same kind of boundary — read it before feeding it patterns you didn't
+write.
 
 ## License
 

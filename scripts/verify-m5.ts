@@ -33,7 +33,8 @@ import {
 import { isTaskProcessAlive } from "../packages/server/src/spawner.ts";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const MAIN_TS = path.join(ROOT, "packages", "server", "src", "main.ts");
+import { resolveServerEntry } from "./lib/server-entry.ts";
+const entry = resolveServerEntry(ROOT);
 const XDG = mkdtempSync("/tmp/opencode/omt-verify-m5-");
 const pathEnv: PathEnv = { XDG_STATE_HOME: `${XDG}/state`, XDG_DATA_HOME: `${XDG}/data` };
 const SERVER_LOG = `${pathEnv.XDG_STATE_HOME}/opencode-monitor-task/server.log`;
@@ -60,7 +61,7 @@ let currentServer: ChildProcess | null = null;
 /** 真实 opencode 共享服务的 service.json（注册表白名单条目；verify 前置） */
 const realServicePath = `${homedir()}/.local/state/opencode/service.json`;
 function spawnServer(): ChildProcess {
-  const child = spawn(process.execPath, ["--import", "tsx", MAIN_TS, "--opencode-state", realServicePath], {
+  const child = spawn(entry.command, [...entry.baseArgs, "--opencode-state", realServicePath], {
     cwd: ROOT,
     env: { ...process.env, XDG_STATE_HOME: pathEnv.XDG_STATE_HOME, XDG_DATA_HOME: pathEnv.XDG_DATA_HOME },
     stdio: "ignore",

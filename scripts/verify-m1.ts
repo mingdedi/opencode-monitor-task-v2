@@ -19,7 +19,8 @@ import { lockFilePath, serviceFilePath, stateDir, type PathEnv } from "@omt/shar
 import { SERVER_VERSION } from "../packages/server/src/main.ts";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const MAIN_TS = path.join(ROOT, "packages", "server", "src", "main.ts");
+import { resolveServerEntry } from "./lib/server-entry.ts";
+const entry = resolveServerEntry(ROOT);
 const XDG = mkdtempSync("/tmp/opencode/omt-verify-m1-");
 const pathEnv: PathEnv = { XDG_STATE_HOME: `${XDG}/state`, XDG_DATA_HOME: `${XDG}/data` };
 const serverEnv = { ...process.env, XDG_STATE_HOME: pathEnv.XDG_STATE_HOME, XDG_DATA_HOME: pathEnv.XDG_DATA_HOME };
@@ -53,7 +54,7 @@ function check(name: string, cond: boolean, detail = ""): void {
 // ---- 服务端进程管理 ----
 const children: ChildProcess[] = [];
 function spawnServer(): ChildProcess {
-  const child = spawn(process.execPath, ["--import", "tsx", MAIN_TS], {
+  const child = spawn(entry.command, [...entry.baseArgs], {
     cwd: ROOT,
     env: serverEnv,
     stdio: "ignore",

@@ -27,7 +27,8 @@ import { exitCodeFromRaw, isTaskProcessAlive, killTree, spawnTask } from "../pac
 import { initTaskDir, readExitFile } from "../packages/server/src/taskstore.ts";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const MAIN_TS = path.join(ROOT, "packages", "server", "src", "main.ts");
+import { resolveServerEntry } from "./lib/server-entry.ts";
+const entry = resolveServerEntry(ROOT);
 const XDG = mkdtempSync("/tmp/opencode/omt-verify-m2pre-");
 const pathEnv: PathEnv = { XDG_STATE_HOME: `${XDG}/state`, XDG_DATA_HOME: `${XDG}/data` };
 
@@ -50,7 +51,7 @@ function check(name: string, cond: boolean, detail = ""): void {
 // ---- 服务端进程（场景⑤）----
 const children: ChildProcess[] = [];
 function spawnServer(args: string[]): ChildProcess {
-  const child = spawn(process.execPath, ["--import", "tsx", MAIN_TS, ...args], {
+  const child = spawn(entry.command, [...entry.baseArgs, ...args], {
     cwd: ROOT,
     env: { ...process.env, XDG_STATE_HOME: pathEnv.XDG_STATE_HOME, XDG_DATA_HOME: pathEnv.XDG_DATA_HOME },
     stdio: "ignore",

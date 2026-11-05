@@ -1,15 +1,41 @@
 {
   "name": "opencode-monitor-task",
   "version": "2.0.0",
-  "private": true,
+  "description": "Run long shell tasks alongside opencode agents — independent daemon + thin plugin, wake-ups via regex-filtered synthetic notifications",
   "type": "module",
+  "license": "MIT",
+  "keywords": [
+    "opencode",
+    "agent",
+    "monitor",
+    "background-tasks",
+    "cli",
+    "notifications"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
   "workspaces": ["packages/*"],
+  "files": [
+    "index.ts",
+    "tui.ts",
+    "src/",
+    "packages/plugin/src/",
+    "packages/shared/src/",
+    "dist/",
+    "docs/"
+  ],
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "test": "node --import tsx --test 'test/*.test.ts' 'packages/*/test/*.test.ts'"
+    "test": "node --import tsx --test 'test/*.test.ts' 'packages/*/test/*.test.ts'",
+    "build": "node scripts/build-server.mjs",
+    "prepack": "npm run build && node scripts/pack-transform.mjs prepack",
+    "postpack": "node scripts/pack-transform.mjs postpack",
+    "prepublishOnly": "npm run typecheck && npm test"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
+    "esbuild": "^0.25.0",
     "tsx": "^4.20.0",
     "typescript": "^5.7.0"
   }
