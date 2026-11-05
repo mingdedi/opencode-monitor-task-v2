@@ -35,7 +35,7 @@
   ],
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "test": "node --import tsx --test 'test/*.test.ts' 'packages/*/test/*.test.ts'",
+    "test": "node --import tsx --test test/*.test.ts packages/*/test/*.test.ts",
     "build": "node scripts/build-server.mjs",
     "prepack": "npm run build && node scripts/pack-transform.mjs prepack",
     "postpack": "node scripts/pack-transform.mjs postpack",

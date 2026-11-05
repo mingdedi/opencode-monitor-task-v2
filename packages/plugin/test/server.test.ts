@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { test, before, after } from "node:test";
 import { ensureServer } from "../src/server.ts";
 import { envFromProcess, serverLogPath, serviceFilePath, stateDir } from "../../shared/src/paths.ts";
@@ -262,5 +263,10 @@ test("⑦ rootDir 默认 = 模块位置推导的 monorepo 根（非 cwd——宿
     },
   });
   assert.equal(seenRoots.length, 1);
-  assert.match(seenRoots[0]!, /opencode-monitor-task-v2$/); // monorepo 根，而非 process.cwd()
+  // 断言"模块位置推导"语义本身（上推三级 = monorepo 根），而非字面目录名——
+  // clone 到任意别名目录同样成立（CI 目录名恒为 repo 名，旧正则锚定在本地别名
+  // clone 下必红）。回归锚语义不变：旧实现（process.cwd()）在宿主冷启动 cwd=HOME
+  // 场景推导出错误根，此处等值断言同样能抓住
+  const expectedRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
+  assert.equal(seenRoots[0], expectedRoot);
 });

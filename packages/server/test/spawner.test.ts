@@ -110,11 +110,29 @@ test("spawn 失败防御：解释器不可用时同步报错且不崩进程（er
 
 test("wrapper 态①：正常退出 0 → exit 文件 \"0\"，stdout 落 log；权限 0600（G 阶段权限审计）", async () => {
   const task = newTask("echo hello-stage-c; exit 0");
-  assert.ok(await waitFor(() => exited(task) === "0"), `exit=${exited(task)}`);
+  // chmod 600 与 printf 同在 EXIT trap 内但分两步——内容就绪 ≠ 权限就绪（node 20 实测
+  // 稳定暴露此窗口），权限断言并入轮询判据消除竞态
+  assert.ok(
+    await waitFor(
+      () =>
+        exited(task) === "0" &&
+        (() => {
+          try {
+            return (statSync(task.paths.exit).mode & 0o777) === 0o600;
+          } catch {
+            return false;
+          }
+        })(),
+    ),
+    `exit=${exited(task)} mode=${(() => {
+      try {
+        return (statSync(task.paths.exit).mode & 0o777).toString(8);
+      } catch {
+        return "n/a";
+      }
+    })()}`,
+  );
   assert.ok(task.log().includes("hello-stage-c"));
-  // 真机 verify-m5 权限审计暴露：printf > 创建跟随 umask（644）——chmod 600 修复回归
-  const mode = statSync(task.paths.exit).mode & 0o777;
-  assert.equal(mode, 0o600, `exit file mode ${mode.toString(8)}`);
 });
 
 test("wrapper 态②：非零退出 7 → exit 文件 \"7\"", async () => {
