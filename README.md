@@ -85,6 +85,21 @@ node --import tsx scripts/verify-m6.ts       # TUI dataflow acceptance (M6)
 node --import tsx scripts/verify-m7.ts       # plugin-tools acceptance (M7)
 ```
 
+### Local install (development)
+
+Until this is published, load the plugin from a checkout by symlinking it into
+opencode's plugin discovery directory — one line, no script needed:
+
+```sh
+ln -sfn "$PWD" ~/.config/opencode/plugins/opencode-monitor-task
+```
+
+The host discovers both parts from the repo root (`index.ts` server part with
+the MCP tools, `tui.ts` panel; see the TUI notes below). `-sfn` makes the
+command idempotent — it also repoints an existing link after you move the
+clone. Remove the link to uninstall; if tools misbehave after a refactor,
+`ls -l` the link first — a stale target silently runs old code.
+
 The TUI panel runs inside the opencode TUI process (plugin entry `tui.ts`,
 discovered from `~/.config/opencode/plugins/` or `<project>/.opencode/plugins/`;
 no dependencies to install — the host injects `@opentui/solid`'s jsx runtime).
