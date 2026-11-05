@@ -12,14 +12,22 @@ export class MonitorApiError extends Error {
   }
 }
 
+/** 构造可选项（fetch 注入便于 TUI/测试替换传输层，默认全局 fetch） */
+export interface MonitorClientOptions {
+  fetchImpl?: typeof fetch;
+}
+
 export class MonitorClient {
   private readonly auth: string;
+  private readonly fetchImpl: typeof fetch;
 
   constructor(
     readonly baseUrl: string,
     password: string,
+    opts: MonitorClientOptions = {},
   ) {
     this.auth = "Basic " + Buffer.from(`monitor:${password}`).toString("base64");
+    this.fetchImpl = opts.fetchImpl ?? fetch;
   }
 
   private async request<T>(
@@ -30,7 +38,7 @@ export class MonitorClient {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), opts.timeoutMs ?? 10_000);
     try {
-      const res = await fetch(this.baseUrl + path, {
+      const res = await this.fetchImpl(this.baseUrl + path, {
         method,
         headers: {
           authorization: this.auth,

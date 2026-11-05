@@ -31,6 +31,11 @@ hot-reloads; tasks run in their own process groups with file-based pipes
   [docs/CONTRACT.md](docs/CONTRACT.md) for verified runtime semantics.
 - **Crash-safe**: exit codes via EXIT-trap wrappers, pid+starttime identity,
   reattach-on-restart with digest summaries (never line-by-line replay).
+- **TUI sidebar panel**: a thin display plugin (`tui.ts` → `src/tui/`) polls the
+  daemon over HTTP (`MonitorClient.listTasks`) and renders per-session task
+  rows — state icons, adjudication countdowns, exit codes, terminal-task
+  folding; `server offline` / `unreachable` states included. Display-only by
+  design: a dead panel never affects monitoring.
 
 ## Requirements
 
@@ -46,7 +51,14 @@ npm run typecheck
 npm test
 node --import tsx scripts/fetch-spec.ts      # refresh OpenAPI snapshot
 node --import tsx scripts/probe-synthetic.ts # verify runtime semantics
+node --import tsx scripts/verify-m6.ts       # TUI dataflow acceptance (M6)
 ```
+
+The TUI panel runs inside the opencode TUI process (plugin entry `tui.ts`,
+discovered from `~/.config/opencode/plugins/` or `<project>/.opencode/plugins/`;
+no dependencies to install — the host injects `@opentui/solid`'s jsx runtime).
+Diagnostics go to `$XDG_STATE_HOME/opencode-monitor-task/tui.log` with
+`DEBUG=1`.
 
 ## Security notes
 

@@ -19,6 +19,7 @@
   "include": [
     "index.ts",
     "tui.ts",
+    "src/**/*.ts",
     "test/**/*.ts",
     "scripts/**/*.ts",
     "packages/*/src/**/*.ts",
