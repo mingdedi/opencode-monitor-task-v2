@@ -43,6 +43,36 @@ hot-reloads; tasks run in their own process groups with file-based pipes
 - opencode ≥ 2.2 (shared background service; `--standalone` / remote
   `--server` modes are not supported)
 
+## Plugin tools (MCP)
+
+The plugin registers three tools with the opencode host (server part entry
+`index.ts`, registered via the official `ctx.tool.transform` contract). They
+are thin wrappers over the daemon's HTTP API — the plugin itself carries no
+business logic beyond daemon discovery/startup.
+
+| Tool | Purpose |
+|---|---|
+| `monitor_server` | Discover or auto-start the daemon; reports health, reattach counts, and the opencode instance whitelist — the data source when you explicitly need cross-instance delivery. |
+| `monitor` | Start a monitored task: `command` (required) plus optional `pattern`, `wake_mode`, `delivery`, `coalesce_ms`, `max_events`, `idle_timeout_ms`, `directory`, `description`, and destination overrides (below). |
+| `monitor_manage` | Manage tasks: `list` (optional `session_id` filter), `status`, `stop`, `keepalive`, `update` (max_events), `read_log`, `delete`. |
+
+Semantics worth knowing:
+
+- **Auto-start**: every tool call runs discovery first (1s health probe) and
+  spawns the daemon if needed — you never have to call `monitor_server`
+  first; it stays useful for explicit diagnostics.
+- **Notification destinations default to "here"**: `session_id` and
+  `opencode_port` are optional. When omitted, the host-authoritative current
+  session and the default shared opencode instance are used; pass them
+  explicitly only for cross-instance / cross-session delivery (the daemon
+  whitelist-checks and liveness-probes both either way).
+- **Idle adjudication is a dialogue**: a silent task first gets *asked*
+  (`keepalive` or `stop`?) with a grace window as backstop; the adjudication
+  envelope names the exact `monitor_manage` call to make.
+- **Errors are model-readable text**: expected failures (validation, daemon
+  4xx, discovery diagnostics carrying pid / service.json / server.log paths)
+  return `error: …` / `hint: …` instead of throwing; unexpected errors throw.
+
 ## Development
 
 ```sh
@@ -52,6 +82,7 @@ npm test
 node --import tsx scripts/fetch-spec.ts      # refresh OpenAPI snapshot
 node --import tsx scripts/probe-synthetic.ts # verify runtime semantics
 node --import tsx scripts/verify-m6.ts       # TUI dataflow acceptance (M6)
+node --import tsx scripts/verify-m7.ts       # plugin-tools acceptance (M7)
 ```
 
 The TUI panel runs inside the opencode TUI process (plugin entry `tui.ts`,
