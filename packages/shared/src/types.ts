@@ -34,6 +34,8 @@ export const LIMITS = {
   sweepIntervalMs: 600_000,
   /** pending 通知重投周期（SERVER-PLAN §三-2） */
   pendingRetryMs: 60_000,
+  /** 单任务 pending 落盘条目上限，防磁盘膨胀（丢最旧计 dropped） */
+  pendingMaxEntries: 100,
   /** stop 时 TERM→KILL 宽限（PLAN §2.2） */
   killGraceMs: 200,
   /** description 最大长度（PLAN §3.3） */

@@ -1,11 +1,14 @@
-// 服务端入口（PLAN §2.1 / §6.1；SERVER-PLAN 阶段 B 最小版 + 阶段 C 注册表接线 + 阶段 D 任务闭环 + 阶段 F 管理端点）
+// 服务端入口（PLAN §2.1 / §6.1；SERVER-PLAN 阶段 B 最小版 + 阶段 C 注册表接线 + 阶段 D 任务闭环
+// + 阶段 F 管理端点 + 阶段 G 恢复与加固）
 // 职责：platform gate → 单实例锁（O_EXCL，内容含 pid）→ 127.0.0.1 随机端口监听
-//       → service.json 600 原子写 → 信号处理（默认不杀任务，PLAN §2.1 退出语义）
+//       → service.json 600 原子写 → 信号处理（默认不杀任务，PLAN §2.1 退出语义；
+//         --shutdown-all / kill_tasks=true 时击杀全部任务进程组）
 //       → 日志落 state 目录（不记命令全文，DEBUG=1 才详细，PLAN §4）
 //       → opencode 实例注册表（--opencode-state 多条目，§2.8.1；health 实例表实测）
 //       → 任务注册表 + 任务端点装配（阶段 D：POST /api/tasks + GET 列表/详情；
-//         阶段 F：stop/keepalive/PATCH/DELETE/log + session 上限/registry 驱逐）
-// 仍不含：reattach（G）、/api/shutdown（G）。
+//         阶段 F：stop/keepalive/PATCH/DELETE/log + session 上限/registry 驱逐；
+//         阶段 G：reattach 认领 + pending 重投 + sweeper TTL + /api/shutdown +
+//         列表/详情与 TaskStore 合并视图——parked 与终态从 store 出）
 //
 // 创建竞态语义（PLAN §2.1-4）：先原子抢锁 → in-use 后到者核对/等待已有 service.json 的 health，
 // 健康则打印后退出码 0（后到者自然退出，service.json 由最终存活者持有）；死持锁者可抢。
@@ -37,13 +40,16 @@ import {
   versionCompatible,
   type HealthInfo,
   type PathEnv,
+  type PublicInfo,
   type ServiceFile,
 } from "@omt/shared";
 import { createMonitorHttpServer, type TaskEndpointOutcome } from "./http.ts";
 import { buildRegistry, parseOpencodeStateArgs, probeInstances, type OpencodeRegistry } from "./opencode.ts";
-import { createTask, Monitor } from "./monitor.ts";
+import { createTask, Monitor, type MonitorDeps } from "./monitor.ts";
+import { retryPendingTasks, scanAndReclaim, type ReattachResult } from "./reattach.ts";
+import { startSweeper } from "./sweeper.ts";
 import { TaskRegistry, isAliveState } from "./registry.ts";
-import { ensurePrivateDir, writeFileAtomic } from "./taskstore.ts";
+import { ensurePrivateDir, listTaskIds, readMeta, StoredTaskView, taskFilePaths, writeFileAtomic } from "./taskstore.ts";
 
 export const SERVER_VERSION: string = (
   JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string }
@@ -217,7 +223,7 @@ export async function main(
 
   ensurePrivateDir(stateDir(paths));
   log(`starting version=${SERVER_VERSION} argv=[${argv.join(" ")}]`);
-  if (shutdownAll) log("--shutdown-all flag recorded (task-group kill wiring lands in stage G)");
+  if (shutdownAll) log("--shutdown-all: all task process groups will be killed on exit (PLAN §2.1)");
   const knownArgs = new Set(["--shutdown-all", "--opencode-state", ...opencodeStatePaths]);
   for (const a of argv) {
     if (!knownArgs.has(a)) log(`note: unrecognized arg '${a}' ignored (future stages may accept it)`);
@@ -231,6 +237,30 @@ export async function main(
 
   // 任务注册表（阶段 D：簿记 + health 计数 + 端点聚合；F 阶段加上限/驱逐，G 加 store 合并视图）
   const tasks = new TaskRegistry();
+
+  // Monitor 依赖共享装配（createTask 与 G 阶段 reattach/pending 重投同源——tick/重试参数一致）
+  const monitorBase: MonitorDeps = { env: paths, ocRegistry, log };
+
+  // reattach 状态（§2.9-5 P1 根治：认领结果显式化——health 可见、失败可懒重试）
+  let reattachRan = false;
+  let reattachInFlight = false;
+  let reattachInfo: HealthInfo["reattach"] = null;
+  const runReattach = (): void => {
+    if (reattachRan || reattachInFlight) return;
+    reattachInFlight = true;
+    void scanAndReclaim({ ...monitorBase, registry: tasks })
+      .then((r) => {
+        reattachInfo = { claimed: r.claimed, finalized: r.finalized, failed: r.failed, at: Date.now() };
+        reattachRan = true;
+        log(`reattach: ${r.claimed} claimed, ${r.finalized} finalized, ${r.failed} failed`);
+      })
+      .catch((err: unknown) => {
+        log(`reattach error (will retry on next health probe): ${String(err).slice(0, 120)}`);
+      })
+      .finally(() => {
+        reattachInFlight = false;
+      });
+  };
 
   // --- 单实例锁 ---
   const lockPath = lockFilePath(paths);
@@ -311,8 +341,10 @@ export async function main(
   const startedAt = Date.now();
   debug(`identity id=${id}`);
 
-  // health 数据源：实例表每次现读 + verifyInstance 实测（§2.8.1——url/password 会变，绝不缓存）
+  // health 数据源：实例表每次现读 + verifyInstance 实测（§2.8.1——url/password 会变，绝不缓存）；
+  // reattach 懒触发（PLAN §2.9：health 被询问前——启动扫描异常时每轮 health 兜底重试）
   const health = async (): Promise<HealthInfo> => {
+    runReattach();
     let logBytes = 0;
     try {
       logBytes = statSync(logPath).size;
@@ -325,15 +357,16 @@ export async function main(
       uptime_s: Math.floor((Date.now() - startedAt) / 1000),
       tasks_alive: tasks.aliveCount(),
       tasks_total: tasks.size,
-      reattach: null, // G 阶段接入（PLAN §2.9-5）
+      reattach: reattachInfo, // G 阶段接入（PLAN §2.9-5）：null = 尚未完成
       opencode_instances: await probeInstances(ocRegistry, paths),
       log_bytes: logBytes,
     };
   };
 
   // 任务端点装配（阶段 D：创建 + 列表 + 详情；阶段 F：+ stop/keepalive/PATCH/DELETE/log；
-  // 阶段 G：+ /api/shutdown）。管理端点只对在册 Monitor 实例有效（G 阶段 parked 从
-  // store 出、无 Monitor 实例 → 404）
+  // 阶段 G：+ /api/shutdown、列表/详情与 TaskStore 合并视图——registry 驱逐或崩溃恢复后
+  // 目录仍在 TTL 内的终态/parked 任务从 store 补齐（PLAN §2.2 "registry 与 TaskStore 合并视图"）。
+  // 管理端点（stop/keepalive/PATCH/log）只对在册 Monitor 实例有效——parked 与 store 终态 404
   const asMonitor = (id: string): Monitor | null => {
     const t = tasks.get(id);
     return t instanceof Monitor ? t : null;
@@ -342,23 +375,35 @@ export async function main(
     status: 404,
     body: { error: `task ${id} not found`, code: "TASK_NOT_FOUND" },
   });
+  /** store 侧补充视图：不在 registry 的任务目录（坏 meta 跳过——reattach 已计数留痕） */
+  const storedInfo = (id: string): PublicInfo | null => {
+    try {
+      const meta = readMeta(paths, id);
+      return meta === null ? null : new StoredTaskView(meta, taskFilePaths(paths, id).log).toPublicInfo();
+    } catch {
+      return null;
+    }
+  };
   const tasksApi = {
     create: async (body: unknown): Promise<TaskEndpointOutcome> => {
-      const r = await createTask(
-        { env: paths, ocRegistry, registry: tasks, log },
-        body,
-      );
+      const r = await createTask({ ...monitorBase, registry: tasks }, body);
       return r.ok ? { status: 201, body: r.info } : { status: r.status, body: r.error };
     },
-    list: (sessionId: string | undefined): TaskEndpointOutcome => ({
-      status: 200,
-      body: tasks.listInfos(sessionId),
-    }),
+    list: (sessionId: string | undefined): TaskEndpointOutcome => {
+      const merged = [...tasks.listInfos(sessionId)];
+      for (const id of listTaskIds(paths)) {
+        if (tasks.get(id) !== undefined) continue;
+        const info = storedInfo(id);
+        if (info !== null && (sessionId === undefined || info.session_id === sessionId)) merged.push(info);
+      }
+      merged.sort((a, b) => a.started_at - b.started_at);
+      return { status: 200, body: merged };
+    },
     get: (id: string): TaskEndpointOutcome => {
       const t = tasks.get(id);
-      return t
-        ? { status: 200, body: t.toPublicInfo() }
-        : { status: 404, body: { error: `task ${id} not found`, code: "TASK_NOT_FOUND" } };
+      if (t !== undefined) return { status: 200, body: t.toPublicInfo() };
+      const info = storedInfo(id);
+      return info !== null ? { status: 200, body: info } : notFound(id);
     },
     patch: async (id: string, body: unknown): Promise<TaskEndpointOutcome> => {
       const v = validatePatchInput(body);
@@ -415,7 +460,31 @@ export async function main(
     },
   };
 
-  const server = createMonitorHttpServer({ password, health, tasks: tasksApi });
+  /** 击杀全部活任务进程组（/api/shutdown kill_tasks=true 与 --shutdown-all 共用）：
+   *  走 requestStop 公共路径（尾批 flush + stopped 终态 + lifecycle 通知 + killTree 两档） */
+  const killAllLiveTasks = async (): Promise<number> => {
+    const mons: Monitor[] = [];
+    for (const info of tasks.listInfos()) {
+      if (!isAliveState(info.state)) continue;
+      const t = tasks.get(info.id);
+      if (t instanceof Monitor) mons.push(t);
+    }
+    for (const mon of mons) {
+      await mon.requestStop().catch(() => {}); // 单任务失败不阻断其余（stopAndFinalize 自带围栏）
+    }
+    return mons.length;
+  };
+  // 退出钩子（信号处理区赋值——shutdown 端点先于其定义，经此间接引用）
+  let exitNow: ((sig: string) => void) | null = null;
+  const shutdownEndpoint = async (killTasks: boolean): Promise<{ killed: number }> => {
+    const killed = killTasks ? await killAllLiveTasks() : 0;
+    log(`shutdown via API (kill_tasks=${killTasks}, killed=${killed})`);
+    // 响应先行送出（handle 内同步 end 进内核缓冲），150ms 后退出兜底送达
+    setTimeout(() => exitNow?.("shutdown-api"), 150);
+    return { killed };
+  };
+
+  const server = createMonitorHttpServer({ password, health, tasks: tasksApi, shutdown: shutdownEndpoint });
   try {
     await new Promise<void>((resolve, reject) => {
       server.once("error", reject);
@@ -439,8 +508,26 @@ export async function main(
   writeServiceFile(paths, svc);
   log(`listening at ${svc.url} (service.json written)`);
 
+  // --- 阶段 G 启动件 ---
+  // reattach：认领崩溃前任务（§2.9）；health 懒触发兜底（启动扫描异常时重试）
+  runReattach();
+  // pending 重投：独立 60s 周期（SERVER-PLAN §三-2，不等 sweeper 的 10min）
+  const pendingTimer = setInterval(() => {
+    void retryPendingTasks({ ...monitorBase, registry: tasks }).then((r) => {
+      if (r.delivered + r.dropped + r.retained > 0) {
+        log(`pending retry: ${r.delivered} delivered, ${r.dropped} dropped, ${r.retained} retained`);
+      }
+    });
+  }, LIMITS.pendingRetryMs);
+  pendingTimer.unref?.();
+  // sweeper：TTL 清理（启动必扫 + 每 10min，PLAN §2.10）
+  const sweeperTimer = startSweeper(paths, tasks, log);
+  sweeperTimer.unref?.();
+
   // 信号处理：SIGTERM/SIGINT 优雅退出；默认不杀任务——任务自成进程组（PLAN §2.1 退出语义）。
-  // kill -9 无法清理 → service.json/lock 残留 = 发现流程的 stale 路径，此为设计内行为。
+  // --shutdown-all（PLAN §2.1"显式参数才击杀全部任务进程组"）：先 requestStop 全部活任务再退。
+  // kill -9 无法清理 → service.json/lock 残留 = 发现流程的 stale 路径，此为设计内行为
+  // （任务进程照跑，重启 reattach 认领——P1 的结构性根治）。
   let exiting = false;
   const cleanupFiles = (): void => {
     for (const p of [serviceFilePath(paths), lockPath]) {
@@ -454,12 +541,19 @@ export async function main(
   const shutdown = (sig: string): void => {
     if (exiting) return;
     exiting = true;
-    log(`received ${sig}, shutting down (any tasks are left running by design)`);
-    server.close();
-    server.closeAllConnections();
-    cleanupFiles();
-    process.exit(0);
+    const finish = (): void => {
+      log(
+        `received ${sig}, shutting down${shutdownAll ? " (--shutdown-all: all task groups killed)" : " (any tasks are left running by design)"}`,
+      );
+      server.close();
+      server.closeAllConnections();
+      cleanupFiles();
+      process.exit(0);
+    };
+    if (shutdownAll) void killAllLiveTasks().then(finish, finish);
+    else finish();
   };
+  exitNow = shutdown;
   process.on("SIGTERM", () => shutdown("SIGTERM"));
   process.on("SIGINT", () => shutdown("SIGINT"));
   process.on("uncaughtException", (err) => {

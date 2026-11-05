@@ -77,10 +77,12 @@ export function exitCodeFromRaw(raw: string | null): string {
 /** wrapper 脚本：EXIT trap 按 128+signo 约定归一为 signal:N 后写 exit 文件；
  *  文件路径经 env（OMT_EXIT_FILE）传递——零引号注入面。命令原样作为脚本体。
  *  信号 trap 必要性（实测）：bash 自身死于 pending SIGTERM 时 laststatus 丢失为 0，
- *  组 TERM 会被误记 "exit 0"——显式转 exit 128+N 保证"被信号杀"在 exit 文件可区分。 */
+ *  组 TERM 会被误记 "exit 0"——显式转 exit 128+N 保证"被信号杀"在 exit 文件可区分。
+ *  chmod 600（真机权限审计暴露）：printf > 创建跟随服务端 umask（644）——exit 文件
+ *  属 0600 契约（PLAN §4 任务目录私有），显式收紧。 */
 export function wrapperScript(command: string): string {
   return [
-    `trap 'rc=$?; if [ "$rc" -ge 128 ]; then printf "signal:%s\\n" "$((rc-128))" >"$OMT_EXIT_FILE"; else printf "%s\\n" "$rc" >"$OMT_EXIT_FILE"; fi' EXIT`,
+    `trap 'rc=$?; if [ "$rc" -ge 128 ]; then printf "signal:%s\\n" "$((rc-128))" >"$OMT_EXIT_FILE"; else printf "%s\\n" "$rc" >"$OMT_EXIT_FILE"; fi; chmod 600 "$OMT_EXIT_FILE"' EXIT`,
     `trap 'exit 129' HUP`,
     `trap 'exit 130' INT`,
     `trap 'exit 143' TERM`,

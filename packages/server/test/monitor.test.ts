@@ -10,7 +10,7 @@ import { test, before, after } from "node:test";
 import { LIMITS, opencodeServicePath, taskDir, type PathEnv, type PublicInfo } from "@omt/shared";
 import { buildRegistry, type OcDeps, type OpencodeRegistry } from "../src/opencode.ts";
 import { isTaskProcessAlive } from "../src/spawner.ts";
-import { readMeta, type TaskMeta } from "../src/taskstore.ts";
+import { readMeta, readPending, type TaskMeta } from "../src/taskstore.ts";
 import { createTask, type CreateTaskOutcome, type MonitorDeps, type Monitor } from "../src/monitor.ts";
 import { TaskRegistry } from "../src/registry.ts";
 
@@ -231,7 +231,7 @@ test("orphaned：session 死亡（404）→ 停止通知 + SIGTERM 温和停止�
   assert.equal(r.registry.aliveCount(), 0);
 });
 
-test("投递耗尽不阻断生命周期：恒 500 → wake/lifecycle 都落 drop，任务照常 completed", async () => {
+test("投递耗尽不阻断生命周期：恒 500 → wake/lifecycle 都落 pending（G 语义），任务照常 completed", async () => {
   const r = rig({ syntheticStatus: 500 });
   const out = await create(r, validBody({ command: "echo dead-letter; sleep 0.2" }));
   assert.equal(out.ok, true);
@@ -239,10 +239,17 @@ test("投递耗尽不阻断生命周期：恒 500 → wake/lifecycle 都落 drop
   assert.ok(await waitFor(() => info(r, out.info.id).state === "completed"));
   const final = info(r, out.info.id);
   assert.equal(final.events_sent, 0);
-  assert.equal(final.events_dropped, 2); // wake（重试 3 次）+ lifecycle（重试 3 次）
+  // G 阶段账目口径：dropped = 真正放弃数——耗尽落 pending 在册不算丢（§2.8.2 末段）
+  assert.equal(final.events_dropped, 0);
   // 首投 + 3 重试 × 2 条通知 = 8 次 synthetic 尝试
   assert.equal(syntheticCalls(r).length, 8);
-  assert.ok(r.logs.some((l) => l.includes("dropped")), r.logs.join(" | "));
+  // pending.json：wake + lifecycle 各 1 条（FIFO 顺序：wake 先入）
+  const pending = readPending(env, out.info.id);
+  assert.equal(pending.length, 2, `pending entries: ${JSON.stringify(pending.map((e) => e.kind))}`);
+  assert.equal(pending[0]!.kind, "wake");
+  assert.equal(pending[1]!.kind, "lifecycle");
+  assert.ok(pending[0]!.idem.startsWith("msg_omt_"), "idempotency id keeps msg_ prefix");
+  assert.ok(r.logs.some((l) => l.includes("deferred to pending")), r.logs.join(" | "));
 });
 
 test("session 死于收尾窗口：404 不触发 orphan，丢失计数留痕（Review 修复回归）", async () => {

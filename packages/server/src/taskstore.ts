@@ -2,6 +2,8 @@
 // 兼载服务端持久化基础设施：原子写（v1 资产 tmp+rename+tmpSeq）与 0700 私有目录（PLAN §4）
 // ——main.ts 的 service.json 写入复用这两件工具。
 // 阶段 B 基础版：无 TTL 清理（G 阶段 sweeper）、pending.json 仅落位路径（D+ deliver 使用）。
+// 阶段 G：pending 落盘通知读写 + StoredTaskView（meta 直出 registry 视图——reattach 死任务
+// 收尾与 parked 认领失败的无 Monitor 数据源）。
 
 import {
   chmodSync,
@@ -10,10 +12,13 @@ import {
   readdirSync,
   readFileSync,
   renameSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
+import { statSync } from "node:fs";
 import { envFromProcess, taskDir, tasksDir, type PathEnv } from "@omt/shared";
-import type { Delivery, ExitInfo, TaskState, WakeMode } from "@omt/shared";
+import type { Delivery, ExitInfo, PublicInfo, TaskState, WakeMode } from "@omt/shared";
+import type { TaskView } from "./registry.ts";
 
 // ---------------------------------------------------------------------------
 // 持久化基础设施
@@ -133,5 +138,121 @@ export function listTaskIds(env: PathEnv = envFromProcess()): string[] {
       .sort();
   } catch {
     return []; // tasks/ 不存在
+  }
+}
+
+// ---------------------------------------------------------------------------
+// pending 落盘通知（PLAN §2.8.2 降级链末段：重试耗尽 → 落盘 → 60s 周期重投）
+// 条目自包含投递参数快照（session/port 不依赖 meta 可读——meta 可能损坏或正被改写）。
+
+export interface PendingEntry {
+  /** 幂等 id（重投复用同 id：CONTRACT.md 实测真去重——先到的 200 后重放安全） */
+  idem: string;
+  kind: "wake" | "lifecycle" | "idle";
+  delivery: Delivery;
+  /** 信封全文（转义已在信封层完成） */
+  text: string;
+  session_id: string;
+  opencode_port: number;
+  queued_at: number;
+}
+
+/** 读 pending；不存在返回 []；坏 JSON 抛错（调用方记日志后按空处理——已损坏的视同放弃） */
+export function readPending(env: PathEnv, id: string): PendingEntry[] {
+  const p = taskFilePaths(env, id).pending;
+  if (!existsSync(p)) return [];
+  const parsed = JSON.parse(readFileSync(p, "utf8")) as PendingEntry[];
+  return Array.isArray(parsed) ? parsed : [];
+}
+
+/** 覆写 pending（空数组 → 删文件：常态无 IO 占用） */
+export function writePending(env: PathEnv, id: string, entries: PendingEntry[]): void {
+  const p = taskFilePaths(env, id).pending;
+  if (entries.length === 0) {
+    try {
+      unlinkSync(p);
+    } catch {
+      // 不存在：无事
+    }
+    return;
+  }
+  writeFileAtomic(p, `${JSON.stringify(entries, null, 2)}\n`);
+}
+
+/** 追加一条 pending（上限丢最旧——被挤掉的条目返回给调用方计 events_dropped：
+ *  账目口径 dropped = 真正放弃的通知数；pending 在册不计丢，重投成功/404 放弃时结转） */
+export function appendPending(env: PathEnv, id: string, entry: PendingEntry, max: number): number {
+  let entries: PendingEntry[] = [];
+  try {
+    entries = readPending(env, id);
+  } catch {
+    // 坏 pending 文件：重置（损坏内容视同放弃，新条目从零开始）
+  }
+  entries.push(entry);
+  let dropped = 0;
+  while (entries.length > max) {
+    entries.shift();
+    dropped++;
+  }
+  writePending(env, id, entries);
+  return dropped;
+}
+
+// ---------------------------------------------------------------------------
+// StoredTaskView：从 meta 直接构造的 registry 视图（G 阶段）
+// —— reattach 收尾的死任务（终态）与 parked（认领失败）无 Monitor 实例，
+//    /api/tasks 合并视图的 store 侧数据源（PLAN §2.2/§2.9-5；registry 只认 TaskView）
+
+/** meta → PublicInfo（与 Monitor.toPublicInfo 同源构造，单一真源防双处分叉） */
+export function metaToPublicInfo(meta: TaskMeta, now: () => number = Date.now): PublicInfo {
+  return {
+    id: meta.id,
+    description: meta.description,
+    state: meta.state,
+    session_id: meta.session_id,
+    opencode_port: meta.opencode_port,
+    directory: meta.directory,
+    command: meta.command,
+    pattern: meta.pattern,
+    wake_mode: meta.wake_mode,
+    delivery: meta.delivery,
+    coalesce_ms: meta.coalesce_ms,
+    max_events: meta.max_events,
+    idle_timeout_ms: meta.idle_timeout_ms,
+    idle_deadline:
+      meta.state === "idle" && meta.grace_deadline !== null ? Math.max(0, meta.grace_deadline - now()) : null,
+    grace_deadline: meta.state === "idle" ? meta.grace_deadline : null,
+    started_at: meta.started_at,
+    pid: meta.pid,
+    lines_scanned: meta.lines_scanned,
+    lines_matched: meta.lines_matched,
+    events_sent: meta.events_sent,
+    events_dropped: meta.events_dropped,
+    exit_info: meta.exit_info,
+    log_bytes: 0, // 调用方按需覆盖（StoredTaskView 现读）
+    last_offset: meta.last_offset,
+    updated_at: meta.updated_at,
+  };
+}
+
+export class StoredTaskView implements TaskView {
+  readonly id: string;
+  private readonly meta: TaskMeta;
+  private readonly logPath: string;
+
+  constructor(meta: TaskMeta, logPath: string) {
+    this.id = meta.id;
+    this.meta = meta;
+    this.logPath = logPath;
+  }
+
+  toPublicInfo(): PublicInfo {
+    const info = metaToPublicInfo(this.meta);
+    try {
+      info.log_bytes = statSync(this.logPath).size;
+    } catch {
+      // log 不存在（parked 的典型成因）：按 0
+    }
+    return info;
   }
 }

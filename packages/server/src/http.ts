@@ -3,7 +3,7 @@
 //         GET /api/tasks/:id（详情）——业务经 tasks 注入，本层只做路由/鉴权/JSON/状态映射。
 // 阶段 F：+ PATCH /api/tasks/:id（max_events）、POST :id/stop、POST :id/keepalive、
 //         DELETE /api/tasks/:id（204）、GET :id/log?tail=N。
-// 阶段 G：+ /api/shutdown。
+// 阶段 G：+ POST /api/shutdown（可选 kill_tasks，默认 false——任务进程照常存活）。
 // 鉴权：Basic auth username 固定 "monitor"（PLAN §2.2），未授权一律 401 JSON。
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
@@ -34,6 +34,9 @@ export interface MonitorHttpOptions {
   health: () => HealthInfo | Promise<HealthInfo>;
   /** 任务端点（阶段 D 起 main.ts 注入；缺省时任务路由 404——http.test 独立测试用） */
   tasks?: TasksApi;
+  /** 关停端点（阶段 G）：kill_tasks=true 时先击杀全部活任务进程组再退出。
+   *  返回被杀数；缺省时 /api/shutdown 404（http.test 独立测试用） */
+  shutdown?: (killTasks: boolean) => Promise<{ killed: number }>;
 }
 
 function send(res: ServerResponse, status: number, body: unknown): void {
@@ -78,6 +81,43 @@ async function handle(req: IncomingMessage, res: ServerResponse, opts: MonitorHt
       return;
     }
     send(res, 200, await opts.health());
+    return;
+  }
+  if (url.pathname === "/api/shutdown" && opts.shutdown) {
+    if (req.method !== "POST") {
+      send(res, 405, { error: "method not allowed", code: "METHOD" });
+      return;
+    }
+    // body 可空；非空须为 JSON 对象 { kill_tasks?: boolean }（其余字段忽略——防呆不严打）。
+    // 无条件读 body：chunked 编码无 content-length，空 body 读出 0 字节自然跳过解析
+    let killTasks = false;
+    const body = await readBody(req);
+    if (!body.ok) {
+      send(res, 413, { error: "request body too large", code: "BODY_TOO_LARGE" });
+      return;
+    }
+    const raw = body.data.toString("utf8");
+    if (raw.trim() !== "") {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        send(res, 400, { error: "request body is not valid JSON", code: "INVALID_JSON" });
+        return;
+      }
+      if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+        send(res, 400, { error: "body must be a JSON object", code: "INVALID_INPUT" });
+        return;
+      }
+      const kt = (parsed as Record<string, unknown>)["kill_tasks"];
+      if (kt !== undefined && typeof kt !== "boolean") {
+        send(res, 400, { error: "kill_tasks must be a boolean", code: "INVALID_INPUT" });
+        return;
+      }
+      killTasks = kt === true;
+    }
+    const r = await opts.shutdown(killTasks);
+    send(res, 200, { ok: true, killed: r.killed });
     return;
   }
   if (url.pathname === "/api/tasks" && opts.tasks) {

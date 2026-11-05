@@ -7,7 +7,8 @@
 //   idle ──► running（keepalive / 新输出自愈，重武装计时）      —— 阶段 F
 //   idle ──► stopped（宽限一个完整窗口仍无裁决 → 自动杀）       —— 阶段 F（§三-5）
 //   running/idle ──► stopped（stop 端点 / update 降额即杀）    —— 阶段 F
-// 留待后续：reattach 认领 fromMeta（G）。
+//   阶段 G：reattach 认领 fromMeta（absorbMissed + emitReconnect，
+//   reattach.ts 编排）；投递耗尽落 pending（重投兜底，§2.8.2 末段）。
 //
 // 驱动：单一 250ms tick（SERVER-PLAN §一）——tail 增量 → 管线（preview 收集【前置于
 // pattern 过滤】——§2.5 末 v1 bug 根治点 → scanned/matched 计数 → pattern 过滤 →
@@ -38,7 +39,16 @@ import {
 } from "@omt/shared";
 import { resolveTarget, verifySessionAlive, type OcDeps, type OpencodeRegistry } from "./opencode.ts";
 import { exitCodeFromRaw, isTaskProcessAlive, killTree, spawnTask } from "./spawner.ts";
-import { initTaskDir, readExitFile, writeMeta, type TaskFilePaths, type TaskMeta } from "./taskstore.ts";
+import {
+  appendPending,
+  initTaskDir,
+  metaToPublicInfo,
+  readExitFile,
+  writeMeta,
+  type PendingEntry,
+  type TaskFilePaths,
+  type TaskMeta,
+} from "./taskstore.ts";
 import { LogTail } from "./tail.ts";
 import { Coalescer, TokenBucket, formatCoalesced, makeMatcher, type Matcher } from "./pipeline.ts";
 import { DeliverChain, deliverNotification, type DeliverOutcome } from "./deliver.ts";
@@ -214,9 +224,9 @@ export async function createTask(
 /** 服务端实例 epoch（模块加载时刻，进程内恒定）——幂等 id 防跨重启碰撞：
  *  G 阶段 reattach 后新通知若复用崩溃前的 seq（同任务同序号），synthetic 的
  *  同 id 重放会静默丢弃新内容（CONTRACT.md 实测：返回首次响应） */
-const INSTANCE_EPOCH = Date.now().toString(36);
+export const INSTANCE_EPOCH = Date.now().toString(36);
 
-function reasonFromCode(code: string): ExitInfo["reason"] {
+export function reasonFromCode(code: string): ExitInfo["reason"] {
   if (code.startsWith("signal:")) return "killed";
   if (code === "unknown") return "unknown";
   return "exited";
@@ -261,7 +271,11 @@ export class Monitor {
     this.matcher = makeMatcher(meta.pattern, meta.wake_mode);
     this.bucket = new TokenBucket({ now: this.now });
     this.coalescer = meta.coalesce_ms > 0 ? new Coalescer(meta.coalesce_ms) : null;
-    this.tail = new LogTail(paths.log, 0); // G 阶段 reattach：从 meta.last_offset 续读
+    // 断点续读（G 阶段 reattach）：起点 = meta.last_offset（行安全断点，tail.ts 语义）。
+    // createTask 路径 last_offset 恒 0，行为不变；reattach 认领前先 absorbMissed
+    // 消费缺席增量（摘要化，绝不逐行重放——PLAN §2.9-3），此后新输出走正常管线
+    this.tail = new LogTail(paths.log, meta.last_offset);
+    this.totalBytes = meta.last_offset; // 已消费绝对字节（续读时从断点起算——persistOffset 依赖）
     this.writeMeta();
     const tickMs = deps.tickMs ?? LIMITS.tailIntervalMs;
     this.timer = setInterval(() => void this.tick(), tickMs);
@@ -272,6 +286,40 @@ export class Monitor {
     return this.preview;
   }
 
+  // -------------------------------------------------------------------
+  // reattach 认领（G 阶段；PLAN §2.9——由 reattach.ts 在构造后同步调用，
+  // 先于任何 tick 回调：JS 单线程下构造→吸收→摘要通知是无竞态原子序列）
+
+  /** 吸收缺席期间的输出：只记账不投递（pumpSilent 复用 ingestLines——scanned/matched
+   *  分类与 preview 收集和正常管线完全一致；offset 前进 = 这段输出已被消费，
+   *  之后的 tick 只投递新输出）。idle 计时不受缺席行影响（§2.9-4 从零武装）。 */
+  absorbMissed(): { lines: number; matched: number } {
+    const before = { scanned: this.meta.lines_scanned, matched: this.meta.lines_matched };
+    this.pumpSilent();
+    return {
+      lines: this.meta.lines_scanned - before.scanned,
+      matched: this.meta.lines_matched - before.matched,
+    };
+  }
+
+  /** reattach 摘要通知（§2.9-3）：一条合并（N 行 / K 命中 / 尾部预览），绝不逐行
+   *  重放。lifecycle 同级规则：恒 queue、绕令牌桶、不计 max_events（恢复语义通知，
+   *  占额会在达顶场景丢摘要——违背"不哑跑"哲学）。预览数据源 = latestPreview()
+   *  （前置于 pattern 过滤收集——v1 bug 根治点在 reattach 路径同样生效）。 */
+  emitReconnect(stats: { lines: number; matched: number }): void {
+    const m = this.meta;
+    const body = [
+      `reconnected: task survived a server restart; ${stats.lines} line(s) of output were produced while unobserved (${stats.matched} matched) — summarized, not replayed line-by-line.`,
+      ...(this.preview.length > 0 ? [`tail preview:`, ...this.preview] : []),
+      `events: ${m.events_sent + this.wakeInFlight} sent, ${m.events_dropped} dropped`,
+    ].join("\n");
+    this.enqueueNotification({
+      kind: "lifecycle",
+      delivery: "queue",
+      text: buildEnvelope({ id: this.id, description: m.description, body }),
+    });
+  }
+
   toPublicInfo(): PublicInfo {
     let logBytes = 0;
     try {
@@ -279,38 +327,10 @@ export class Monitor {
     } catch {
       // log 尚未创建（理论不可达：spawnTask 先建 log）
     }
-    const m = this.meta;
-    return {
-      id: m.id,
-      description: m.description,
-      state: m.state,
-      session_id: m.session_id,
-      opencode_port: m.opencode_port,
-      directory: m.directory,
-      command: m.command,
-      pattern: m.pattern,
-      wake_mode: m.wake_mode,
-      delivery: m.delivery,
-      coalesce_ms: m.coalesce_ms,
-      max_events: m.max_events,
-      idle_timeout_ms: m.idle_timeout_ms,
-      // F 阶段激活（PLAN §2.7）：仅 idle 态非 null——idle_deadline 是宽限期剩余毫秒
-      // （序列化时动态计算，agent 直接可读"还剩多久被杀"）；grace_deadline 是绝对
-      // 截止 epoch ms（机器精确；与 meta.grace_deadline 同源）
-      idle_deadline:
-        m.state === "idle" && m.grace_deadline !== null ? Math.max(0, m.grace_deadline - this.now()) : null,
-      grace_deadline: m.state === "idle" ? m.grace_deadline : null,
-      started_at: m.started_at,
-      pid: m.pid,
-      lines_scanned: m.lines_scanned,
-      lines_matched: m.lines_matched,
-      events_sent: m.events_sent,
-      events_dropped: m.events_dropped,
-      exit_info: m.exit_info,
-      log_bytes: logBytes,
-      last_offset: m.last_offset,
-      updated_at: m.updated_at,
-    };
+    // 构造逻辑与 StoredTaskView 同源（taskstore.metaToPublicInfo 单一真源）
+    const info = metaToPublicInfo(this.meta, this.now);
+    info.log_bytes = logBytes;
+    return info;
   }
 
   // -------------------------------------------------------------------
@@ -499,6 +519,16 @@ export class Monitor {
 
   private enqueueNotification(n: { kind: "wake" | "lifecycle" | "idle"; delivery: Delivery; text: string }): void {
     const idem = `msg_omt_${INSTANCE_EPOCH}_${this.id}_${this.notifySeq++}`; // Session.Message.ID pattern ^msg_（真机实测：非 msg_ 前缀 400）
+    // pending 落盘快照（G 阶段）：投递参数自包含——重投不依赖 meta 可读
+    const entry: PendingEntry = {
+      idem,
+      kind: n.kind,
+      delivery: n.delivery,
+      text: n.text,
+      session_id: this.meta.session_id,
+      opencode_port: this.meta.opencode_port,
+      queued_at: Date.now(),
+    };
     const p = this.chain.run(() =>
       deliverNotification(
         {
@@ -518,22 +548,23 @@ export class Monitor {
       ),
     );
     void p.then(
-      (outcome) => this.safeOnDelivered(n.kind, outcome),
-      (err) => this.safeOnDelivered(n.kind, { ok: false, kind: "exhausted", detail: `job threw: ${String(err)}` }),
+      (outcome) => this.safeOnDelivered(n.kind, outcome, entry),
+      (err) =>
+        this.safeOnDelivered(n.kind, { ok: false, kind: "exhausted", detail: `job threw: ${String(err)}` }, entry),
     );
   }
 
   /** onDelivered 的错误围栏：投递簿记里的任何异常（如 meta 落盘磁盘错误）不得变成
    *  unhandled rejection——那会经 uncaughtException 把整个服务端拖垮（main.ts exit 1） */
-  private safeOnDelivered(kind: "wake" | "lifecycle" | "idle", outcome: DeliverOutcome): void {
+  private safeOnDelivered(kind: "wake" | "lifecycle" | "idle", outcome: DeliverOutcome, entry: PendingEntry): void {
     try {
-      this.onDelivered(kind, outcome);
+      this.onDelivered(kind, outcome, entry);
     } catch (err) {
       this.safeLog(`task ${this.id} delivery bookkeeping error: ${String(err)}`);
     }
   }
 
-  private onDelivered(kind: "wake" | "lifecycle" | "idle", outcome: DeliverOutcome): void {
+  private onDelivered(kind: "wake" | "lifecycle" | "idle", outcome: DeliverOutcome, entry: PendingEntry): void {
     if (outcome.ok) {
       if (kind === "wake") {
         this.wakeInFlight--;
@@ -564,6 +595,30 @@ export class Monitor {
       void this.orphan(outcome.detail);
       return;
     }
+    if (outcome.kind === "exhausted") {
+      // G 阶段（§2.8.2 降级链末段）：重试耗尽 → 落盘 pending，60s 周期重投兜底。
+      // 账目口径：pending 在册不算丢（dropped = 真正放弃数）；仅被上限挤掉的
+      // 最旧条目或落盘失败才计 dropped
+      let evicted = 0;
+      try {
+        evicted = appendPending(this.deps.env, this.id, entry, LIMITS.pendingMaxEntries);
+      } catch (err) {
+        // pending 落盘失败（磁盘故障）：通知真正丢失——计 dropped 留痕
+        this.meta.events_dropped += 1;
+        this.safeLog(
+          `task ${this.id} notification lost (${kind}: pending persist failed): ${String(err).slice(0, 120)}`,
+        );
+        this.safeWriteMeta();
+        return;
+      }
+      if (evicted > 0) this.meta.events_dropped += evicted;
+      this.safeLog(
+        `task ${this.id} notification deferred to pending (${kind}, retries exhausted): ${outcome.detail.slice(0, 120)}`,
+      );
+      this.safeWriteMeta();
+      return;
+    }
+    // invalid（4xx 契约错误，调用方 bug）：重投无意义，直接放弃计 dropped——契约测试守门
     this.meta.events_dropped += 1;
     this.safeLog(
       `task ${this.id} notification dropped (${kind}/${outcome.kind}): ${outcome.detail.slice(0, 120)}`,

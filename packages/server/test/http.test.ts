@@ -314,3 +314,64 @@ test("未注入 tasks（阶段 B 形态）：任务路由仍 404 NO_ROUTE（向�
   srv.close();
   srv.closeAllConnections();
 });
+
+// ---------------------------------------------------------------------------
+// POST /api/shutdown（阶段 G）
+
+test("shutdown：空 body 默认不杀任务；kill_tasks 透传；坏参数 400；GET 405", async () => {
+  const calls: boolean[] = [];
+  const srv = createMonitorHttpServer({
+    password: PASSWORD,
+    health: () => ({ ...healthStub }),
+    shutdown: async (killTasks) => {
+      calls.push(killTasks);
+      return { killed: killTasks ? 3 : 0 };
+    },
+  });
+  await new Promise<void>((resolve) => srv.listen(0, "127.0.0.1", resolve));
+  const b = `http://127.0.0.1:${(srv.address() as AddressInfo).port}`;
+  const h = { authorization: auth(PASSWORD), "content-type": "application/json" };
+
+  // 空 body（无 content-length 的 POST）：kill_tasks 默认 false
+  const r1 = await fetch(b + "/api/shutdown", { method: "POST", headers: h });
+  assert.equal(r1.status, 200);
+  assert.deepEqual(await r1.json(), { ok: true, killed: 0 });
+
+  // 显式 JSON body
+  const r2 = await fetch(b + "/api/shutdown", { method: "POST", headers: h, body: JSON.stringify({ kill_tasks: true }) });
+  assert.deepEqual(await r2.json(), { ok: true, killed: 3 });
+
+  // kill_tasks 非 boolean → 400
+  const r3 = await fetch(b + "/api/shutdown", { method: "POST", headers: h, body: JSON.stringify({ kill_tasks: "yes" }) });
+  assert.equal(r3.status, 400);
+  assert.equal(((await r3.json()) as ApiError).code, "INVALID_INPUT");
+
+  // 坏 JSON → 400
+  const r4 = await fetch(b + "/api/shutdown", { method: "POST", headers: h, body: "{oops" });
+  assert.equal(r4.status, 400);
+  assert.equal(((await r4.json()) as ApiError).code, "INVALID_JSON");
+
+  // 非 object body（数组）→ 400
+  const r5 = await fetch(b + "/api/shutdown", { method: "POST", headers: h, body: "[]" });
+  assert.equal(r5.status, 400);
+
+  // GET → 405
+  const r6 = await fetch(b + "/api/shutdown", { headers: h });
+  assert.equal(r6.status, 405);
+
+  assert.deepEqual(calls, [false, true]); // 只有两次合法调用到达
+  srv.close();
+  srv.closeAllConnections();
+});
+
+test("shutdown 未注入 → 404 NO_ROUTE（向后兼容）", async () => {
+  const srv = createMonitorHttpServer({ password: PASSWORD, health: () => ({ ...healthStub }) });
+  await new Promise<void>((resolve) => srv.listen(0, "127.0.0.1", resolve));
+  const res = await fetch(`http://127.0.0.1:${(srv.address() as AddressInfo).port}/api/shutdown`, {
+    method: "POST",
+    headers: { authorization: auth(PASSWORD) },
+  });
+  assert.equal(res.status, 404);
+  srv.close();
+  srv.closeAllConnections();
+});

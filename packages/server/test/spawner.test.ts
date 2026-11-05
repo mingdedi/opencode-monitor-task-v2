@@ -1,7 +1,7 @@
 // spawner 单测（SERVER-PLAN 阶段 C）：wrapper 四态、detached 存活、双因子探活、killTree
 // 真实进程（无 mock）——进程语义必须真机验证（v1 纪律）；任务目录走隔离 XDG
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test, before, after } from "node:test";
@@ -108,10 +108,13 @@ test("spawn 失败防御：解释器不可用时同步报错且不崩进程（er
 // ---------------------------------------------------------------------------
 // wrapper 四态：exit 0 / exit 7 / 信号 TERM / SIGKILL（无文件 → unknown）
 
-test("wrapper 态①：正常退出 0 → exit 文件 \"0\"，stdout 落 log", async () => {
+test("wrapper 态①：正常退出 0 → exit 文件 \"0\"，stdout 落 log；权限 0600（G 阶段权限审计）", async () => {
   const task = newTask("echo hello-stage-c; exit 0");
   assert.ok(await waitFor(() => exited(task) === "0"), `exit=${exited(task)}`);
   assert.ok(task.log().includes("hello-stage-c"));
+  // 真机 verify-m5 权限审计暴露：printf > 创建跟随 umask（644）——chmod 600 修复回归
+  const mode = statSync(task.paths.exit).mode & 0o777;
+  assert.equal(mode, 0o600, `exit file mode ${mode.toString(8)}`);
 });
 
 test("wrapper 态②：非零退出 7 → exit 文件 \"7\"", async () => {
