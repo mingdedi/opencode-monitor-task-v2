@@ -22,6 +22,8 @@ export const LIMITS = {
   tailIntervalMs: 250,
   /** 无换行软换行阈值（PLAN §2.5） */
   softWrapBytes: 65_536,
+  /** 摘要尾部预览行数（PLAN §2.9-3；收集前置于 pattern 过滤，§2.5 末 v1 bug 根治） */
+  previewLines: 5,
   /** 合并窗口默认值，0 关闭（PLAN §3.3） */
   defaultCoalesceMs: 500,
   /** 通知上限默认值（PLAN §3.3） */

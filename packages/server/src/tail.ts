@@ -1,4 +1,4 @@
-// 日志 tail（PLAN §2.5 / §6.1；SERVER-PLAN 阶段 D）
+// 日志 tail（PLAN §2.5 / §6.1；SERVER-PLAN 阶段 D + 阶段 E 软换行）
 // 关注点分离（PLAN §5.2）：只 tail——持久 fd + readSync 轮询读增量（不用 fs.watch，
 // NFS/容器安全，v1 实证），StringDecoder 处理多字节边界，产出 cleanLine 后的行流；
 // 不判死活（monitor 职责）、不做投递（deliver 职责）。
@@ -6,9 +6,14 @@
 // last_offset 语义裁定（PLAN §2.3 "断点续读点"具体化）：暴露 pendingBytes()，
 // 调用方记 last_offset = 已读字节 - 未成行残余字节，即"最后一个换行符后"的行安全
 // 断点——reattach 从该处续读不丢不重、不拼残行。
+//
+// 64KB 软换行（PLAN §2.5 / v1 feedChunk 资产）：永不换行的输出流（进度条类是 \r
+// 已成行；此处针对连 \r 都没有的极端流）在未成行残余超过 64KB 时强制成行——
+// 防单行无限膨胀。软换行后 pending 清空、offset 前进（该段已消费）。
 
 import { closeSync, openSync, readSync } from "node:fs";
 import { StringDecoder } from "node:string_decoder";
+import { LIMITS } from "@omt/shared";
 import { cleanLine, splitLines } from "./pipeline.ts";
 
 export interface TailResult {
@@ -49,9 +54,20 @@ export class LogTail {
     if (bytes === 0) return { lines: [], bytesConsumed: 0 };
     const { lines: rawLines, rest } = splitLines(this.pending, decoded);
     this.pending = rest;
+    // 64KB 无换行软换行：残余超阈值强制成行（v1 资产；cleanLine 再截 2000——
+    // 目的是防膨胀不是保全内容）
+    let softWrapped: string | null = null;
+    if (Buffer.byteLength(this.pending) > LIMITS.softWrapBytes) {
+      softWrapped = this.pending;
+      this.pending = "";
+    }
     const lines: string[] = [];
     for (const raw of rawLines) {
       const cleaned = cleanLine(raw);
+      if (cleaned !== null) lines.push(cleaned);
+    }
+    if (softWrapped !== null) {
+      const cleaned = cleanLine(softWrapped);
       if (cleaned !== null) lines.push(cleaned);
     }
     return { lines, bytesConsumed: bytes };

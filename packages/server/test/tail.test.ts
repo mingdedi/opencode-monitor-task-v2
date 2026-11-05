@@ -93,3 +93,36 @@ test("大 chunk：超过单次读缓冲（64KB）循环读尽；无换行长行�
   assert.equal(r.bytesConsumed, Buffer.byteLength(big));
   t.close();
 });
+
+test("64KB 软换行（SERVER-PLAN 阶段 E）：未成行残余超阈值强制成行，pending 清空", async () => {
+  const t = new LogTail(newLog());
+  // 一次写入 64KB+1 无换行 → 软换行立即触发（poll 内判定）
+  appendFileSync(logPath, "z".repeat(LIMITS.softWrapBytes + 1));
+  const r1 = t.poll();
+  assert.equal(r1.lines.length, 1, "残余超限强制成行");
+  assert.equal(r1.lines[0]!.length, LIMITS.lineMaxChars, "软换行行同样过 cleanLine 截断");
+  assert.equal(t.pendingBytes(), 0, "软换行后 pending 清空（该段已消费）");
+  t.close();
+});
+
+test("64KB 软换行边界：恰 64KB 不触发，后续字节仍未成行", async () => {
+  const t = new LogTail(newLog());
+  appendFileSync(logPath, "a".repeat(LIMITS.softWrapBytes));
+  const r1 = t.poll();
+  assert.deepEqual(r1.lines, [], "恰 64KB 不软换行");
+  assert.equal(t.pendingBytes(), LIMITS.softWrapBytes);
+  appendFileSync(logPath, "b\n"); // 追加后成行：软换行段 + 新字符合成一行
+  const r2 = t.poll();
+  assert.deepEqual(r2.lines, ["a".repeat(LIMITS.softWrapBytes) + "b"].map((l) => l.slice(0, LIMITS.lineMaxChars)));
+  t.close();
+});
+
+test("软换行 offset 语义：强制成行后 pendingBytes=0，last_offset 前进到文件尾", async () => {
+  const t = new LogTail(newLog());
+  const blob = "q".repeat(LIMITS.softWrapBytes + 100);
+  appendFileSync(logPath, blob);
+  const r = t.poll();
+  assert.equal(r.bytesConsumed, blob.length);
+  assert.equal(r.bytesConsumed - t.pendingBytes(), blob.length, "行安全点 = 文件尾（软换行段已交付）");
+  t.close();
+});

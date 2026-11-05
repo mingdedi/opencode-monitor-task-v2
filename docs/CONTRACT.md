@@ -47,6 +47,24 @@
 - `POST /api/session`（`session.create`，body 可含 `title`）→ 200；`DELETE /api/session/{sessionID}`（`session.remove`）→ 204 —— probe 的隔离会话搭建/清理通道
 - `GET /api/session/{sessionID}` → session 存活校验（任务创建 fail fast）
 
+## synthetic 调度时序（阶段 E 真机实测，2026-11-05）
+
+**POST 200 ≠ 消息即时显现**。密集注入实验（同 session 快速连发 6 条 synthetic，幂等 id 各异）：
+
+- 6 条 POST 全部即时 200（几 ms/条）
+- 消息**经 opencode 串行 turn 调度后才出现在 message 列表**：每条 synthetic 触发一个真实
+  agent turn（`assistant` + `idle` 消息成对出现），turn 串行排队、每 turn 一次 LLM 调用（秒级）
+- 30s 后仅前 2 条已调度显现，其余 4 条仍在队列（无丢失——继续等待会消化）
+
+对 v2 的三点影响：
+
+1. **投递成功判据以 synthetic 200 + 服务端 events 计数（meta）为权威**；会话侧"消息可见数"
+   是调度行为，验收不作判据（storm-sim ③④ 据此裁定，lifecycle → 会话显现链路由 ① 单 wake
+   场景完整验证）
+2. **佐证令牌桶 / coalesce 的设计价值**：每条通知 = 一个 LLM turn，风暴合并 30→1 就是在省
+   29 个 turn——通知预算同时是 turn 预算
+3. **G 阶段 pending 重投的去重依据不变**：幂等 id 重放返回首次响应（上表），重投安全
+
 ## 版本下限结论（开放问题 §9-1）
 
 synthetic / inbox 为正式注册端点（OpenAPI 3.1，operationId `session.synthetic`）。

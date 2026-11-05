@@ -1,13 +1,18 @@
-// 单任务状态机（PLAN §2.4/§2.5/§2.7/§2.8 / §6.1；SERVER-PLAN 阶段 D 骨架）
-// 全部状态枚举一次成型（TaskState 已含 idle/stopped/orphaned/parked），D 阶段激活：
+// 单任务状态机（PLAN §2.4/§2.5/§2.7/§2.8 / §6.1；SERVER-PLAN 阶段 D 骨架 + 阶段 E 管线全套）
+// 全部状态枚举一次成型（TaskState 已含 idle/stopped/orphaned/parked），已激活：
 //   running ──► completed(exit "0") / failed(非零或信号)     —— 自然收尾路径
 //   running ──► orphaned（通知目的地 session 死亡）           —— §2.8.2 + SERVER-PLAN §三-1
-// 留待后续：idle 两段式裁决 + stop/keepalive（F）；reattach 认领 fromMeta（G）；
-//           pattern/coalesce/令牌桶/max_events 即停即杀（E，本版直通）。
+//   running ──► stopped（max_events 即停即杀，PLAN §3.3）      —— 阶段 E
+// 留待后续：idle 两段式裁决 + stop/keepalive（F）；reattach 认领 fromMeta（G）。
 //
-// 驱动：单一 250ms tick（SERVER-PLAN §一）——tail 增量 → 直通管线（cleanLine 后
-// 非空行即命中）→ 投递入链 → 进程死活检查 → 终态收尾（尾批 flush 先入链，lifecycle
-// 恒 queue 且不计 max_events，PLAN §2.7-4）。
+// 驱动：单一 250ms tick（SERVER-PLAN §一）——tail 增量 → 管线（preview 收集【前置于
+// pattern 过滤】——§2.5 末 v1 bug 根治点 → scanned/matched 计数 → pattern 过滤 →
+// coalesce 入窗/直通）→ coalesce 到期 flush → 令牌桶 + max_events 节流投递 → 进程
+// 死活检查 → 终态收尾（尾批 flush 先入链，lifecycle 恒 queue 且不计 max_events、
+// 绕令牌桶，PLAN §2.7-4）。
+// 即停即杀触发点：第 max_events 条 wake 成功送达（onDelivered）——失败的通知不占额
+// （D 阶段裁定：events_sent 成功回调计数 + wakeInFlight 防超发，与 v1 入链计数有意
+// 分歧，进度记录在案）。
 // createTask 编排：validate（shared）→ resolveTarget 白名单（400）→ directory 存在
 // （400，同步本地校验先于网络）→ session 存活（404）→ spawn → 看护接管。
 // fail fast 全过才开始执行。
@@ -28,6 +33,7 @@ import { resolveTarget, verifySessionAlive, type OcDeps, type OpencodeRegistry }
 import { exitCodeFromRaw, isTaskProcessAlive, killTree, spawnTask } from "./spawner.ts";
 import { initTaskDir, readExitFile, writeMeta, type TaskFilePaths, type TaskMeta } from "./taskstore.ts";
 import { LogTail } from "./tail.ts";
+import { Coalescer, TokenBucket, formatCoalesced, makeMatcher, type Matcher } from "./pipeline.ts";
 import { DeliverChain, deliverNotification, type DeliverOutcome } from "./deliver.ts";
 import type { TaskRegistry } from "./registry.ts";
 
@@ -43,6 +49,8 @@ export interface MonitorDeps {
   ocDeps?: OcDeps;
   /** 等待注入（deliver 重试退避 + exit 文件竞态宽限；单测加速） */
   sleep?: (ms: number) => Promise<void>;
+  /** 时钟注入（令牌桶补充 + coalesce 窗口判定；单测可控推进） */
+  now?: () => number;
   /** tick 周期（默认 LIMITS.tailIntervalMs；单测可缩短） */
   tickMs?: number;
   /** 投递重试间隔（默认 500/2s/8s） */
@@ -180,6 +188,13 @@ export class Monitor {
   private readonly pgid: number;
   private readonly tail: LogTail;
   private readonly chain = new DeliverChain();
+  private readonly now: () => number;
+  private readonly matcher: Matcher | null;
+  private readonly bucket: TokenBucket;
+  private readonly coalescer: Coalescer | null; // coalesce_ms > 0 时存在；0 = 直通
+  /** 尾部预览 ring（未过滤行流，前置于 pattern 过滤收集——§2.5 末 v1 bug 根治；
+   *  G 阶段 reattach 摘要数据源，PLAN §2.9-3） */
+  private readonly preview: string[] = [];
   private meta: TaskMeta;
   private totalBytes = 0;
   private timer: NodeJS.Timeout | null = null;
@@ -195,10 +210,19 @@ export class Monitor {
     this.id = meta.id;
     this.identity = { pid: meta.pid ?? -1, startTime: meta.proc_start_time };
     this.pgid = meta.pgid ?? meta.pid ?? -1;
+    this.now = deps.now ?? (() => Date.now());
+    this.matcher = makeMatcher(meta.pattern, meta.wake_mode);
+    this.bucket = new TokenBucket({ now: this.now });
+    this.coalescer = meta.coalesce_ms > 0 ? new Coalescer(meta.coalesce_ms) : null;
     this.tail = new LogTail(paths.log, 0); // G 阶段 reattach：从 meta.last_offset 续读
     this.writeMeta();
     const tickMs = deps.tickMs ?? LIMITS.tailIntervalMs;
     this.timer = setInterval(() => void this.tick(), tickMs);
+  }
+
+  /** 尾部预览（未过滤；G 阶段 reattach 摘要数据源） */
+  latestPreview(): readonly string[] {
+    return this.preview;
   }
 
   toPublicInfo(): PublicInfo {
@@ -239,7 +263,7 @@ export class Monitor {
   }
 
   // -------------------------------------------------------------------
-  // tick：读增量 → 直通投递 → 死活检查 → 收尾
+  // tick：读增量 → 管线 → coalesce 到期 → 死活检查 → 收尾
 
   private async tick(): Promise<void> {
     if (this.finalizing) return;
@@ -250,6 +274,7 @@ export class Monitor {
         return;
       }
       this.pump();
+      this.flushCoalesceIfDue();
     } catch (err) {
       this.safeLog(`task ${this.id} tick error: ${String(err)}`);
     }
@@ -273,16 +298,42 @@ export class Monitor {
     }
   }
 
-  /** 读增量并按直通管线投递（cleanLine 后非空行即命中——E 阶段替换为 matcher） */
+  /** 读增量并走管线：preview 收集（前置，§2.5 末）→ scanned → pattern 过滤 →
+   *  命中行入 coalesce 窗（或直通 dispatch）。offset 持久化。 */
   private pump(): void {
     const r = this.tail.poll();
     if (r.bytesConsumed === 0) return;
     this.totalBytes += r.bytesConsumed;
-    for (const line of r.lines) {
-      this.meta.lines_matched += 1; // 直通：全部命中（scanned 留给 E 的 pattern 未命中计数）
-      this.emitWake(line);
-    }
+    this.ingestLines(r.lines, true);
     this.persistOffset();
+  }
+
+  /** 行流公共管线（投递与 silent 记账共用：preview/scanned/matched 分类一致，
+   *  仅 silent 不投递——orphan 后无人可投，但计数语义不变） */
+  private ingestLines(lines: readonly string[], deliverable: boolean): void {
+    for (const line of lines) {
+      // ① preview 收集前置于 pattern 过滤（v1 bug 根治点：pattern 模式下摘要预览
+      //    恒空——顺序上根治，未命中行同样进预览）
+      this.preview.push(line);
+      if (this.preview.length > LIMITS.previewLines) this.preview.shift();
+      // ② 计数：scanned 对全部清洗后非空行；matched 仅命中（直通无 pattern 时全命中）
+      this.meta.lines_scanned += 1;
+      const m = this.matcher !== null ? this.matcher.judge(line) : null;
+      if (m === null) {
+        this.meta.lines_matched += 1; // 直通：无过滤，全部命中
+      } else if (m.matched) {
+        this.meta.lines_matched += 1;
+      } else if (!m.pass) {
+        continue; // pattern 模式未命中：计数后丢弃，永不唤醒
+      }
+      // ③ pass 行投递：coalesce 窗口或直通
+      if (!deliverable) continue;
+      if (this.coalescer !== null) {
+        this.coalescer.add(line, this.now());
+      } else {
+        this.dispatchWake(line);
+      }
+    }
   }
 
   /** 读尽余量只记账不投递（orphan 后无人可投） */
@@ -290,8 +341,23 @@ export class Monitor {
     const r = this.tail.poll();
     if (r.bytesConsumed === 0) return;
     this.totalBytes += r.bytesConsumed;
-    this.meta.lines_matched += r.lines.length;
+    this.ingestLines(r.lines, false);
     this.persistOffset();
+  }
+
+  /** coalesce 窗口到期 flush（tumbling；到期判定由本 tick 驱动——SERVER-PLAN §一） */
+  private flushCoalesceIfDue(): void {
+    if (this.coalescer === null || !this.coalescer.due(this.now())) return;
+    const batch = this.coalescer.flush();
+    if (batch !== null) this.dispatchWake(formatCoalesced(batch));
+  }
+
+  /** 立即 flush 窗口内余量（终态收尾前调用：尾批先入链保序，v1 flushCoalesce 资产；
+   *  绕 state 检查但保留令牌桶与 max_events 上限——v1 ignoreFinalized 语义） */
+  private flushCoalesceNow(): void {
+    if (this.coalescer === null) return;
+    const batch = this.coalescer.flush();
+    if (batch !== null) this.dispatchWake(formatCoalesced(batch));
   }
 
   private persistOffset(): void {
@@ -302,9 +368,17 @@ export class Monitor {
   // -------------------------------------------------------------------
   // 通知
 
-  private emitWake(line: string): void {
+  /** 节流投递一条 wake（单行或合并批正文）：max_events 达顶丢弃 → 令牌桶超限丢弃
+   *  （v1 dispatchLine 资产顺序；超限丢弃计数、永不缓存）→ 入链。
+   *  无 state 检查——终态尾批 flush 也走此路（v1 ignoreFinalized 语义：绕 state、
+   *  保留桶与上限）。lifecycle 不走此路（恒入链绕桶不计额，PLAN §2.7-4）。 */
+  private dispatchWake(text: string): void {
     if (this.meta.events_sent + this.wakeInFlight >= this.meta.max_events) {
-      // 达顶停发（E 阶段接入"即停即杀"完整语义，PLAN §3.3）
+      // 达顶停发（即停即杀在最后一条 wake 成功送达回调触发——失败通知不占额）
+      this.meta.events_dropped += 1;
+      return;
+    }
+    if (!this.bucket.tryTake()) {
       this.meta.events_dropped += 1;
       return;
     }
@@ -317,18 +391,22 @@ export class Monitor {
     this.enqueueNotification({
       kind: "wake",
       delivery: this.meta.delivery,
-      text: buildEnvelope({ id: this.id, description: this.meta.description, body: line }),
+      text: buildEnvelope({ id: this.id, description: this.meta.description, body: text }),
     });
   }
 
-  private emitLifecycle(): void {
+  private emitLifecycle(reason?: string): void {
     const m = this.meta;
     const body = [
       `finished: ${m.state}${m.exit_info ? ` (exit ${m.exit_info.code})` : ""}`,
-      `lines: ${m.lines_matched} matched, ${m.lines_scanned} filtered`,
-      `events: ${m.events_sent} sent, ${m.events_dropped} dropped`,
+      ...(reason !== undefined ? [reason] : []),
+      `lines: ${m.lines_matched} matched, ${m.lines_scanned - m.lines_matched} filtered`,
+      // sent 含在途 wake（保序下必先于本 lifecycle 送达——agent 视角一致；
+      // 若在途者最终失败会补计 dropped，此处按发出时点口径）
+      `events: ${m.events_sent + this.wakeInFlight} sent, ${m.events_dropped} dropped`,
     ].join("\n");
-    // 恒 queue 且绕过链上限（PLAN §2.7-4：退出结局必须到达 agent）；绕令牌桶由 E 管线接入时保证
+    // 恒 queue 且绕过链上限（PLAN §2.7-4：退出结局必须到达 agent）；绕令牌桶由
+    // dispatchWake 之外直入链保证（lifecycle 不经 dispatchWake）
     this.enqueueNotification({
       kind: "lifecycle",
       delivery: "queue",
@@ -377,6 +455,12 @@ export class Monitor {
       if (kind === "wake") {
         this.wakeInFlight--;
         this.meta.events_sent += 1; // lifecycle 不计（不占 max_events 额度）
+        this.safeWriteMeta();
+        // 即停即杀（PLAN §3.3 "达顶即停即杀"）：第 max_events 条 wake 成功送达。
+        // 竞态幂等：若进程已先自然死亡（finalize 已收尾），stopForMaxEvents 早退，
+        // 自然终态优先——退出结局已由 lifecycle 送达，语义无损
+        if (this.meta.events_sent >= this.meta.max_events) void this.stopForMaxEvents();
+        return;
       }
       this.safeWriteMeta();
       return;
@@ -413,7 +497,8 @@ export class Monitor {
     this.finalizing = true;
     this.stopTimer();
     try {
-      this.pump(); // 进程已死，log 不再增长：此轮即读尽（wake → 尾批 flush → lifecycle 严格序）
+      this.pump(); // 进程已死，log 不再增长：此轮即读尽
+      this.flushCoalesceNow(); // coalesce 窗内余量：尾批入链（lifecycle 之前，v1 资产）
     } catch (err) {
       this.safeLog(`task ${this.id} final pump error: ${String(err)}`);
     }
@@ -425,6 +510,40 @@ export class Monitor {
     this.safeWriteMeta();
     this.tail.close();
     this.safeLog(`task ${this.id} finished: ${this.meta.state} exit=${code}`);
+  }
+
+  /** max_events 即停即杀（PLAN §3.3）：SIGTERM 温和停止进程组（killTree 两档），
+   *  state=stopped，lifecycle 注明原因。经 void 调用（onDelivered 同步回调内）——
+   *  全程围栏，异常外泄即 unhandled rejection（orphan 同款纪律） */
+  private async stopForMaxEvents(): Promise<void> {
+    if (this.finalizing) return; // 自然收尾/orphan/已停：先到者赢
+    this.finalizing = true;
+    this.stopTimer();
+    try {
+      this.flushCoalesceNow(); // 窗内余量仍属 agent（达顶批会被 dispatchWake 计 dropped）
+      const tier = await killTree(this.pgid);
+      const raw = await this.readExitWithGrace();
+      const code = exitCodeFromRaw(raw);
+      this.meta.state = "stopped";
+      this.meta.exit_info = { code, reason: reasonFromCode(code) };
+      this.emitLifecycle(`reason: reached max_events=${this.meta.max_events}`);
+      this.safeWriteMeta();
+      this.tail.close();
+      this.safeLog(
+        `task ${this.id} stopped: reached max_events=${this.meta.max_events} (process group killed, tier=${tier}, exit=${code})`,
+      );
+    } catch (err) {
+      // 看护撤除路径故障（如磁盘错误）：状态兜底推进 + 留痕，绝不外泄
+      this.meta.state = "stopped";
+      this.meta.exit_info = this.meta.exit_info ?? { code: "unknown", reason: "unknown" };
+      try {
+        this.writeMeta();
+      } catch {
+        // 双重故障：只剩日志
+      }
+      this.tail.close(); // close 内部自吞错
+      this.safeLog(`task ${this.id} stop error (state forced to stopped): ${String(err)}`);
+    }
   }
 
   /** orphaned：通知目的地已死——停止通知、SIGTERM 温和停止进程组（§三-1）。
