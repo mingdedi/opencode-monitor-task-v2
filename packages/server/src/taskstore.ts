@@ -179,23 +179,32 @@ export function writePending(env: PathEnv, id: string, entries: PendingEntry[]):
   writeFileAtomic(p, `${JSON.stringify(entries, null, 2)}\n`);
 }
 
-/** 追加一条 pending（上限丢最旧——被挤掉的条目返回给调用方计 events_dropped：
- *  账目口径 dropped = 真正放弃的通知数；pending 在册不计丢，重投成功/404 放弃时结转） */
-export function appendPending(env: PathEnv, id: string, entry: PendingEntry, max: number): number {
+/** 追加结果：上限挤掉条数（计 events_dropped——账目口径 dropped = 真正放弃数） +
+ *  原文件损坏重置标志（损坏内容视同放弃，调用方留痕） */
+export interface AppendPendingResult {
+  evicted: number;
+  reset: boolean;
+}
+
+/** 追加一条 pending；上限丢最旧（被挤掉的条目计入 evicted 返回调用方） */
+export function appendPending(env: PathEnv, id: string, entry: PendingEntry, max: number): AppendPendingResult {
   let entries: PendingEntry[] = [];
+  let reset = false;
   try {
     entries = readPending(env, id);
   } catch {
-    // 坏 pending 文件：重置（损坏内容视同放弃，新条目从零开始）
+    // 坏 pending 文件：重置（损坏内容视同放弃，新条目从零开始）——reset 标志让
+    // 调用方可观察（taskstore 无 logger，静默放弃违背不哑跑的可观察性）
+    reset = true;
   }
   entries.push(entry);
-  let dropped = 0;
+  let evicted = 0;
   while (entries.length > max) {
     entries.shift();
-    dropped++;
+    evicted++;
   }
   writePending(env, id, entries);
-  return dropped;
+  return { evicted, reset };
 }
 
 // ---------------------------------------------------------------------------

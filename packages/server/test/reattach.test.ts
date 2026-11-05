@@ -350,6 +350,80 @@ test("终态/parked 重扫入册（真机场景④回归）：二次 scanAndRecl
   process.kill(-meta.pgid!, "SIGKILL");
 });
 
+test("invalid 条目即时丢弃不阻塞队首（Review 修复回归）：后继条目照常送达", async () => {
+  const r = rig(200);
+  const id = "mon_pinv0000001";
+  initTaskDir(r.env, id);
+  writePending(r.env, id, [
+    { idem: "bad1", kind: "lifecycle", delivery: "queue", text: "permanently-rejected", session_id: SESSION, opencode_port: 65534, queued_at: 1 },
+    { idem: "good2", kind: "lifecycle", delivery: "queue", text: "should-deliver", session_id: SESSION, opencode_port: 65534, queued_at: 2 },
+  ]);
+  // 头条恒 400（invalid = 永久拒绝），次条正常
+  const realFetch = r.oc.fetchImpl;
+  r.oc.fetchImpl = (async (url: string | URL | Request, init?: RequestInit) => {
+    const bodyId = init?.body ? (JSON.parse(init.body as string) as { id?: string }).id : undefined;
+    if (bodyId === "bad1") return new Response("{}", { status: 400 });
+    return realFetch(url, init);
+  }) as typeof fetch;
+  r.deps.ocDeps = { ...r.deps.ocDeps, fetchImpl: r.oc.fetchImpl };
+
+  // 旧实现：invalid 与 exhausted 混同 → retained=1 + break → good2 永不被尝试
+  const out = await retryPendingTasks(r.deps);
+  assert.equal(out.dropped, 1, `dropped=${out.dropped}`);
+  assert.equal(out.delivered, 1, `delivered=${out.delivered}`);
+  assert.equal(out.retained, 0);
+  assert.equal(readPending(r.env, id).length, 0, "both entries retired");
+  assert.ok(r.logs.some((l) => l.includes("invalid, permanent rejection")), r.logs.join(" | "));
+  assert.ok(textOf(syntheticCalls(r).find((c) => c.body?.id === "good2")!).includes("should-deliver"));
+});
+
+test("重扫幂等守卫（Review 修复回归）：已在册任务不二次构造 Monitor", async () => {
+  const r = rig();
+  const { id } = await residue(r, "sleep 3");
+  const res1 = await scanAndReclaim(r.deps);
+  assert.equal(res1.claimed, 1);
+  const mon1 = r.registry.get(id);
+  const notices1 = syntheticCalls(r).length;
+
+  // 同 registry 重扫（懒触发路径）：旧实现会 new 第二个 Monitor（双定时器/双投递）
+  const res2 = await scanAndReclaim(r.deps);
+  assert.deepEqual(res2, { claimed: 0, finalized: 0, failed: 0 });
+  assert.strictEqual(r.registry.get(id), mon1, "registry entry must be the SAME Monitor instance");
+  assert.equal(syntheticCalls(r).length, notices1, "no duplicate reconnected notice");
+
+  await settle(r, id);
+});
+
+test("死路结局通知 pending-first（Review 修复回归）：投递在途时兜底已落盘，成功后移除", async () => {
+  const r = rig(200);
+  const { id } = await residue(r, "echo bye; exit 3");
+  const metaBefore = readMeta(r.env, id)!;
+  assert.ok(
+    await waitFor(() => !isTaskProcessAlive({ pid: metaBefore.pid!, startTime: metaBefore.proc_start_time })),
+    "task exits while unobserved",
+  );
+  // 投递人为延迟 200ms：scanAndReclaim 在途期间，pending 必须已含兜底条目
+  // （旧顺序此时 pending 为空——重试窗口内二次崩溃即永久丢结局通知）
+  const realFetch = r.oc.fetchImpl;
+  r.oc.fetchImpl = (async (url: string | URL | Request, init?: RequestInit) => {
+    const u = String(url instanceof Request ? url.url : url);
+    if (u.includes("/synthetic")) await sleep(200);
+    return realFetch(url, init);
+  }) as typeof fetch;
+  r.deps.ocDeps = { ...r.deps.ocDeps, fetchImpl: r.oc.fetchImpl };
+
+  const inFlight = scanAndReclaim(r.deps);
+  await sleep(100); // 进入投递延迟窗口（终态已落盘、通知未送达）
+  const midPending = readPending(r.env, id);
+  assert.equal(midPending.length, 1, "pending entry must exist while delivery is in flight");
+  assert.ok(midPending[0]!.idem.includes("reattach_final"));
+
+  const res = await inFlight;
+  assert.equal(res.finalized, 1);
+  assert.equal(readPending(r.env, id).length, 0, "retired after successful delivery");
+  assert.equal(syntheticCalls(r).length, 1);
+});
+
 test("pending 重投：恢复后 FIFO 送达移除；404 放弃；仍失败保留（首败即停保序）", async () => {
   const r = rig(500); // opencode"不可达"期
   const id = "mon_pend000001";

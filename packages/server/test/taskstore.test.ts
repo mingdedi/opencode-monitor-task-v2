@@ -146,7 +146,7 @@ test("pending：append FIFO 上限丢最旧并返回计数；空数组写删文�
   // 上限 5：追加 7 条 → 丢最旧 2
   let evicted = 0;
   for (let i = 1; i <= 7; i++) {
-    evicted += appendPending(env, id, mk(i), 5);
+    evicted += appendPending(env, id, mk(i), 5).evicted;
   }
   assert.equal(evicted, 2);
   const entries = readPending(env, id);
@@ -157,9 +157,17 @@ test("pending：append FIFO 上限丢最旧并返回计数；空数组写删文�
   writePending(env, id, []);
   assert.equal(readPending(env, id).length, 0);
   assert.ok(!(await import("node:fs")).existsSync(taskFilePaths(env, id).pending), "empty pending removes file");
-  // append 到不存在的文件：等价从零开始
-  assert.equal(appendPending(env, id, mk(9), 5), 0);
+  // append 到不存在的文件：等价从零开始（无挤掉、无重置）
+  const fresh = appendPending(env, id, mk(9), 5);
+  assert.deepEqual(fresh, { evicted: 0, reset: false });
   assert.equal(readPending(env, id).length, 1);
+  // 坏 pending 文件：重置并如实报告（可观察——静默放弃违背不哑跑）
+  writeFileSync(taskFilePaths(env, id).pending, "{ corrupt", { mode: 0o600 });
+  const reset = appendPending(env, id, mk(10), 5);
+  assert.deepEqual(reset, { evicted: 0, reset: true });
+  const after = readPending(env, id);
+  assert.equal(after.length, 1); // 仅新条目，损坏内容放弃
+  assert.equal(after[0]!.idem, "m10");
 });
 
 test("StoredTaskView：meta 直出 PublicInfo（log 现读；log 缺失按 0）", async () => {

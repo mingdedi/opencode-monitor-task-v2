@@ -511,13 +511,20 @@ export async function main(
   // --- 阶段 G 启动件 ---
   // reattach：认领崩溃前任务（§2.9）；health 懒触发兜底（启动扫描异常时重试）
   runReattach();
-  // pending 重投：独立 60s 周期（SERVER-PLAN §三-2，不等 sweeper 的 10min）
+  // pending 重投：独立 60s 周期（SERVER-PLAN §三-2，不等 sweeper 的 10min）。
+  // .catch 围栏与 sweeper run() 对齐——生产 deliverNotification 已验证不抛
+  // （opencode.ts 全链 catch 为返回值），但 uncaughtException → exit(1) 姿态下
+  // 未来任何逃逸异常都不该经此拖垮服务端
   const pendingTimer = setInterval(() => {
-    void retryPendingTasks({ ...monitorBase, registry: tasks }).then((r) => {
-      if (r.delivered + r.dropped + r.retained > 0) {
-        log(`pending retry: ${r.delivered} delivered, ${r.dropped} dropped, ${r.retained} retained`);
-      }
-    });
+    void retryPendingTasks({ ...monitorBase, registry: tasks })
+      .then((r) => {
+        if (r.delivered + r.dropped + r.retained > 0) {
+          log(`pending retry: ${r.delivered} delivered, ${r.dropped} dropped, ${r.retained} retained`);
+        }
+      })
+      .catch((err: unknown) => {
+        log(`pending retry error: ${String(err).slice(0, 120)}`);
+      });
   }, LIMITS.pendingRetryMs);
   pendingTimer.unref?.();
   // sweeper：TTL 清理（启动必扫 + 每 10min，PLAN §2.10）

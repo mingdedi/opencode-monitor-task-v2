@@ -50,6 +50,10 @@ export type ReattachDeps = MonitorDeps & { registry: TaskRegistry };
 export async function scanAndReclaim(deps: ReattachDeps): Promise<ReattachResult> {
   const result: ReattachResult = { claimed: 0, finalized: 0, failed: 0 };
   for (const id of listTaskIds(deps.env)) {
+    // 重扫幂等防御（Review 修复）：懒触发路径在首扫失败后可整轮重跑——本实例已看护
+    // （在册 Monitor / StoredTaskView）的任务跳过，否则二次构造 Monitor = 双定时器、
+    // 双投递、双计数。单实例锁保证跨进程无并发认领，本守卫闭合同进程重扫
+    if (deps.registry.get(id) !== undefined) continue;
     let meta: TaskMeta | null = null;
     try {
       meta = readMeta(deps.env, id);
@@ -190,6 +194,47 @@ async function finalizeDeadTask(deps: ReattachDeps, metaInput: TaskMeta): Promis
     `events: ${meta.events_sent} sent, ${meta.events_dropped} dropped`,
   ].join("\n");
   const text = buildEnvelope({ id: meta.id, description: meta.description, body });
+  const idem = `msg_omt_${INSTANCE_EPOCH}_${meta.id}_reattach_final`;
+
+  // pending-first（Review 修复）：先落 pending 再投递。旧顺序（终态 meta 落盘 → 投递 →
+  // 耗尽才落 pending）在重试窗口（默认退避全程 ~10.5s——恰是 opencode 不可达、最易
+  // 连带崩溃的时段）内二次崩溃会永久丢失结局通知：下轮启动见终态直接跳过，pending
+  // 尚未写入。先落后投则任何时点崩溃都由重投器凭同 idem 兜底；投递成功后移除
+  // pending，若移除前崩溃 → 下轮重投同 id，synthetic 幂等去重，无害。
+  // 注意：在册 Monitor 的 lifecycle 路径维持旧顺序（既有权衡——pending-first 对每条
+  // 通知引入三倍 IO 且与 wake 不落盘的设计分歧，仅在恢复路径的单一通知上值得）
+  let pendingOnDisk = false;
+  try {
+    const r = appendPending(
+      deps.env,
+      meta.id,
+      {
+        idem,
+        kind: "lifecycle",
+        delivery: "queue",
+        text,
+        session_id: meta.session_id,
+        opencode_port: meta.opencode_port,
+        queued_at: Date.now(),
+      },
+      LIMITS.pendingMaxEntries,
+    );
+    pendingOnDisk = true;
+    if (r.evicted > 0) {
+      meta.events_dropped += r.evicted;
+      try {
+        writeMeta(deps.env, meta);
+      } catch {
+        // best-effort
+      }
+    }
+    if (r.reset) {
+      deps.log(`task ${meta.id} pending: file was corrupt — reset (previous entries abandoned)`);
+    }
+  } catch (err) {
+    // pending 落盘失败（磁盘故障）：仍尝试直投——成功则无需兜底，失败即真丢（留痕）
+    deps.log(`task ${meta.id} reattach: pending pre-write failed (${String(err).slice(0, 60)}) — delivering anyway`);
+  }
 
   const outcome = await deliverNotification(
     {
@@ -204,13 +249,15 @@ async function finalizeDeadTask(deps: ReattachDeps, metaInput: TaskMeta): Promis
       opencodePort: meta.opencode_port,
       text,
       delivery: "queue",
-      idempotencyId: `msg_omt_${INSTANCE_EPOCH}_${meta.id}_reattach_final`,
+      idempotencyId: idem,
     },
   );
   if (outcome.ok) {
+    if (pendingOnDisk) retirePending(deps, meta.id, idem);
     deps.log(`task ${meta.id} reattach: finalized ${meta.state} (exit ${code}), outcome notice delivered`);
   } else if (outcome.kind === "session-not-found") {
-    // 会话已死：无处投递，计 dropped 留痕（不哑跑）；终态照常落盘
+    // 会话已死：pending 无处可去，移除 + 计 dropped 留痕（不哑跑）；终态照常
+    if (pendingOnDisk) retirePending(deps, meta.id, idem);
     meta.events_dropped += 1;
     try {
       writeMeta(deps.env, meta);
@@ -219,44 +266,29 @@ async function finalizeDeadTask(deps: ReattachDeps, metaInput: TaskMeta): Promis
     }
     deps.log(`task ${meta.id} reattach: finalized ${meta.state}, but session is gone (notice dropped)`);
   } else {
-    // 耗尽：落 pending 交重投器（§2.8.2 末段）
-    try {
-      const evicted = appendPending(
-        deps.env,
-        meta.id,
-        {
-          idem: `msg_omt_${INSTANCE_EPOCH}_${meta.id}_reattach_final`,
-          kind: "lifecycle",
-          delivery: "queue",
-          text,
-          session_id: meta.session_id,
-          opencode_port: meta.opencode_port,
-          queued_at: Date.now(),
-        },
-        LIMITS.pendingMaxEntries,
-      );
-      if (evicted > 0) {
-        meta.events_dropped += evicted;
-        writeMeta(deps.env, meta);
-      }
-    } catch {
-      meta.events_dropped += 1;
-      try {
-        writeMeta(deps.env, meta);
-      } catch {
-        // best-effort
-      }
-    }
+    // 耗尽：pending 已在册，重投器兜底；invalid 同样留给重投器按永久失败丢弃（不重投）
     deps.log(`task ${meta.id} reattach: finalized ${meta.state}, outcome notice deferred to pending`);
   }
   deps.registry.add(new StoredTaskView(meta, taskFilePaths(deps.env, meta.id).log));
+}
+
+/** 移除单条 pending（投递成功/死 session 后收尾）；失败无害：残留条目由重投器以同
+ *  idem 重投，synthetic 幂等去重 */
+function retirePending(deps: ReattachDeps, id: string, idem: string): void {
+  try {
+    const current = readPending(deps.env, id);
+    writePending(deps.env, id, current.filter((e) => e.idem !== idem));
+  } catch {
+    // best-effort
+  }
 }
 
 // ---------------------------------------------------------------------------
 // pending 重投（SERVER-PLAN §三-2：独立 60s 周期，不等 sweeper 的 10min）
 // 遍历 store 全部任务（死任务目录同样有 pending——结局通知的兜底也在这里）；
 // 逐条复用原幂等 id 重投（CONTRACT.md：先到的 200 后重放安全，真去重）。
-// 保序：从最旧条目试起，遇首个仍失败即停（前面的没送到，后面的先到只会乱序）。
+// 处置分类：ok → 移除；404/invalid（永久失败）→ 丢弃计 dropped 并继续；
+// exhausted（暂不可达）→ 保留并停试其后条目（保序——前面没送到，后面不抢跑）。
 // 并发闭合：与 Monitor 的 appendPending 同文件读改写竞态，用"结束时重读并过滤
 // 本轮已送达 idem"收口（单线程内 filter 原子；期间新增的条目自然保留）。
 
@@ -282,7 +314,6 @@ export async function retryPendingTasks(deps: ReattachDeps): Promise<PendingRetr
     }
     if (entries.length === 0) continue;
     const deliveredIdems = new Set<string>();
-    let stop = false;
     for (const entry of entries) {
       const outcome = await deliverNotification(
         {
@@ -313,9 +344,18 @@ export async function retryPendingTasks(deps: ReattachDeps): Promise<PendingRetr
         deps.log(`task ${id} pending: entry dropped (session gone): ${outcome.detail.slice(0, 80)}`);
         continue;
       }
-      // exhausted：目标仍不可达——保留下轮再试；invalid 不重投但保守保留计数留痕
+      if (outcome.kind === "invalid") {
+        // 永久拒绝（4xx 契约错误）：重投永无成功可能（§2.8.2 invalid 不重试）——丢弃
+        // 计 dropped 并继续。Review 修复：旧实现把 invalid 与 exhausted 混同保留并
+        // break——队首一条 invalid 将永久阻塞其后的全部条目（每轮单次尝试后即停），
+        // pending 队列静默饿死
+        out.dropped++;
+        deliveredIdems.add(entry.idem); // 从 pending 移除
+        deps.log(`task ${id} pending: entry dropped (invalid, permanent rejection): ${outcome.detail.slice(0, 80)}`);
+        continue;
+      }
+      // exhausted：目标暂不可达——保留下轮再试；保序起见本轮不试其后条目
       out.retained++;
-      stop = true;
       break;
     }
     if (deliveredIdems.size === 0) continue; // 全保留：无写回必要

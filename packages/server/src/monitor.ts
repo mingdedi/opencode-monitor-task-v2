@@ -599,9 +599,12 @@ export class Monitor {
       // G 阶段（§2.8.2 降级链末段）：重试耗尽 → 落盘 pending，60s 周期重投兜底。
       // 账目口径：pending 在册不算丢（dropped = 真正放弃数）；仅被上限挤掉的
       // 最旧条目或落盘失败才计 dropped
-      let evicted = 0;
       try {
-        evicted = appendPending(this.deps.env, this.id, entry, LIMITS.pendingMaxEntries);
+        const r = appendPending(this.deps.env, this.id, entry, LIMITS.pendingMaxEntries);
+        if (r.evicted > 0) this.meta.events_dropped += r.evicted;
+        if (r.reset) {
+          this.safeLog(`task ${this.id} pending: file was corrupt — reset (previous entries abandoned)`);
+        }
       } catch (err) {
         // pending 落盘失败（磁盘故障）：通知真正丢失——计 dropped 留痕
         this.meta.events_dropped += 1;
@@ -611,7 +614,6 @@ export class Monitor {
         this.safeWriteMeta();
         return;
       }
-      if (evicted > 0) this.meta.events_dropped += evicted;
       this.safeLog(
         `task ${this.id} notification deferred to pending (${kind}, retries exhausted): ${outcome.detail.slice(0, 120)}`,
       );
