@@ -142,6 +142,10 @@ Semantics worth knowing:
 
 ## Development
 
+Documentation map: [ARCHITECTURE.md](docs/ARCHITECTURE.md) (system design),
+[CONTRACT.md](docs/CONTRACT.md) (verified opencode HTTP API semantics),
+[PLUGIN-CONTRACT.md](docs/PLUGIN-CONTRACT.md) (plugin host contract).
+
 ```sh
 npm install
 npm run typecheck
@@ -200,7 +204,9 @@ bundle forms): state and data roots are 0700 (`~/.local/state/opencode-monitor-t
 `~/.local/share/opencode-monitor-task/`), `service.json` / lock / `meta.json`
 / task logs are 0600, and `meta.json` never contains credentials — the
 opencode password is re-read from the live service.json on every delivery.
-The daemon's own log records ids, counters and errors, never command text.
+The daemon's own log is opt-in: it stays off by default (no file is
+created) and is enabled at server start with `--debug` or `DEBUG=1` —
+when on, it records ids, counters and errors, never command text.
 
 Command validation (trailing `&`, `$(...)`, backticks, …) is a guard rail,
 not a security boundary: the daemon intentionally runs arbitrary bash as

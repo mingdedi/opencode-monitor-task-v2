@@ -3,7 +3,8 @@
 // 职责：platform gate → 单实例锁（O_EXCL，内容含 pid）→ 127.0.0.1 随机端口监听
 //       → service.json 600 原子写 → 信号处理（默认不杀任务，PLAN §2.1 退出语义；
 //         --shutdown-all / kill_tasks=true 时击杀全部任务进程组）
-//       → 日志落 state 目录（不记命令全文，DEBUG=1 才详细，PLAN §4）
+//       → 日志落 state 目录（默认关闭；--debug / DEBUG=1 启动时开启，开启后也不记
+//         命令全文，PLAN §4 / §9-2 决策：日志是启动时决定的 debug 选项，不做轮转）
 //       → opencode 实例注册表（--opencode-state 多条目，§2.8.1；health 实例表实测）
 //       → 任务注册表 + 任务端点装配（阶段 D：POST /api/tasks + GET 列表/详情；
 //         阶段 F：stop/keepalive/PATCH/DELETE/log + session 上限/registry 驱逐；
@@ -251,12 +252,16 @@ export async function main(
   const paths = envFromProcess(env);
   const shutdownAll = argv.includes("--shutdown-all");
   const opencodeStatePaths = parseOpencodeStateArgs(argv);
-  const debugOn = env["DEBUG"] === "1";
+  // 日志开关：启动时一次决定（--debug 参数或 DEBUG=1 env，任一即开），运行中不变。
+  // 默认关闭——零写入、server.log 不创建（§9-2 决策：日志是 debug 选项而非常设设施；
+  // 不做轮转，磁盘占用问题随默认关闭一起消解）。开启后也不记命令全文（PLAN §4 红线）。
+  const logOn = argv.includes("--debug") || env["DEBUG"] === "1";
   const logPath = serverLogPath(paths);
 
-  // 日志：单文件追加（SERVER-PLAN §三-6：第一版不轮转，health 暴露 log_bytes）；
-  // 默认只记关键事件不含命令全文，详细诊断仅 DEBUG=1（PLAN §4）
+  // 单文件追加（SERVER-PLAN §三-6 原轮转决策被 §9-2 开关决策取代；health 暴露 log_bytes）；
+  // 关键事件 + DEBUG 行同闸：开关的目的就是 debug，无需两级独立控制
   const log = (msg: string): void => {
+    if (!logOn) return;
     try {
       appendFileSync(logPath, `[${new Date().toISOString()} pid${process.pid}] ${msg}\n`);
     } catch {
@@ -264,13 +269,13 @@ export async function main(
     }
   };
   const debug = (msg: string): void => {
-    if (debugOn) log(`DEBUG ${msg}`);
+    if (logOn) log(`DEBUG ${msg}`);
   };
 
   ensurePrivateDir(stateDir(paths));
   log(`starting version=${SERVER_VERSION} argv=[${argv.join(" ")}]`);
   if (shutdownAll) log("--shutdown-all: all task process groups will be killed on exit (PLAN §2.1)");
-  const knownArgs = new Set(["--shutdown-all", "--opencode-state", ...opencodeStatePaths]);
+  const knownArgs = new Set(["--shutdown-all", "--debug", "--opencode-state", ...opencodeStatePaths]);
   for (const a of argv) {
     if (!knownArgs.has(a)) log(`note: unrecognized arg '${a}' ignored (future stages may accept it)`);
   }

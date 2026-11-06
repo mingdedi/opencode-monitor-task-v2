@@ -18,13 +18,16 @@ export interface ServerEntry {
   form: "bundle" | "source";
 }
 
-/** dist/server.mjs 存在 → bundle；否则源码 tsx 直跑（开发形态）。 */
+/** dist/server.mjs 存在 → bundle；否则源码 tsx 直跑（开发形态）。
+ *  baseArgs 恒带 --debug：服务端日志默认关闭（PLAN §9-2 决策），而 verify-m4/m5/m8
+ *  与 storm-sim 的判据依赖 server.log 留痕（reattach 认领、无命令全文审计）——
+ *  脚本侧统一显式开启，一处改动全套脚本生效。 */
 export function resolveServerEntry(
   root: string,
   exists: (p: string) => boolean = existsSync,
 ): ServerEntry {
   const bundle = path.join(root, "dist", "server.mjs");
-  if (exists(bundle)) return { command: process.execPath, baseArgs: [bundle], form: "bundle" };
+  if (exists(bundle)) return { command: process.execPath, baseArgs: [bundle, "--debug"], form: "bundle" };
   const source = path.join(root, "packages", "server", "src", "main.ts");
-  return { command: process.execPath, baseArgs: ["--import", "tsx", source], form: "source" };
+  return { command: process.execPath, baseArgs: ["--import", "tsx", source, "--debug"], form: "source" };
 }

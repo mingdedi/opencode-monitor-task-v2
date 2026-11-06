@@ -74,7 +74,7 @@ async function connect(
   } catch (err) {
     return fail(
       `monitor server discovery/startup failed: ${err instanceof Error ? err.message : String(err)}`,
-      "the message above carries pid / service.json / server.log paths — inspect them for the cause",
+      "the message above carries pid / service.json / server.log paths — inspect them for the cause (daemon log is opt-in: start the server with --debug / DEBUG=1 to capture it)",
     );
   }
   const client =

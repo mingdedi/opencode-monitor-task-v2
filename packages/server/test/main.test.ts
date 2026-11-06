@@ -5,7 +5,7 @@ import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, mkdirSync
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test, before, after } from "node:test";
-import { main, readServiceFile, recoveryThenSweep, removalOutcome, SERVER_VERSION, writeServiceFile } from "../src/main.ts";import { lockFilePath, serviceFilePath, stateDir, type PathEnv, type PublicInfo, type ServiceFile } from "@omt/shared";
+import { main, readServiceFile, recoveryThenSweep, removalOutcome, SERVER_VERSION, writeServiceFile } from "../src/main.ts";import { lockFilePath, serverLogPath, serviceFilePath, stateDir, type PathEnv, type PublicInfo, type ServiceFile } from "@omt/shared";
 
 let root: string;
 let env: NodeJS.ProcessEnv;
@@ -100,6 +100,37 @@ test("owned + 已有健康实例在服务（锁与实例脱钩异常态）→ �
   assert.equal(existsSync(lockFilePath(paths)), false); // 自己抢的锁自己清
   assert.equal(existsSync(serviceFilePath(paths)), true); // 别人的 service.json 不动
 });
+
+// 日志开关（PLAN §9-2 决策：启动时一次决定，默认关闭零写入）。
+// 走 in-use 健康让位分支——该路径必经 log("starting")/log("lock in-use")，是
+// "开关是否写文件"的最短可测路径（serve 分支由 verify-m1 真机覆盖）。
+// 旧实现（log 无条件追加）下"默认不产生 server.log"断言必失败——必失败纪律。
+for (const c of [
+  { name: "默认（无 --debug 无 DEBUG=1）→ server.log 不创建", argv: [] as string[], debugEnv: "", expectLog: false },
+  { name: "--debug 参数 → server.log 写入关键事件行", argv: ["--debug"], debugEnv: "", expectLog: true },
+  { name: "DEBUG=1 env → 与 --debug 等价", argv: [], debugEnv: "1", expectLog: true },
+] as const) {
+  test(`日志开关：${c.name}`, async () => {
+    rmSync(serverLogPath(paths), { force: true });
+    // 独立 env：显式排除宿主 DEBUG 污染（process.env 展开可能携带 DEBUG=1）
+    const cleanEnv: NodeJS.ProcessEnv = { ...process.env, XDG_STATE_HOME: paths.XDG_STATE_HOME, XDG_DATA_HOME: paths.XDG_DATA_HOME };
+    delete cleanEnv["DEBUG"];
+    if (c.debugEnv !== "") cleanEnv["DEBUG"] = c.debugEnv;
+    presetLock(59999);
+    presetService({});
+    const r = await main([...c.argv], cleanEnv, {
+      isAlive: () => true,
+      probe: async () => ({ ok: true, version: SERVER_VERSION }),
+    });
+    assert.equal(r.code, 0);
+    const logExists = existsSync(serverLogPath(paths));
+    assert.equal(logExists, c.expectLog, `server.log exists=${logExists}`);
+    if (c.expectLog) {
+      const text = readFileSync(serverLogPath(paths), "utf-8");
+      assert.match(text, /starting version=/, "关键事件行应在场");
+    }
+  });
+}
 
 // 注：owned + 已有实例"版本不兼容"→ 不让位继续服务的分支，serve 路径会真监听挂起，
 // 不在单测做——由 scripts/verify-m1.ts 真机语义覆盖（发现方对不兼容活实例直接报错不 spawn）。
