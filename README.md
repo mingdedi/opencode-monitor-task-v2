@@ -61,7 +61,9 @@ The host discovers both parts from the package root (the `index.ts` server
 part with the MCP tools, the `tui.ts` panel). Remove the symlink to
 uninstall; re-run the `ln -sfn` line after upgrading to repoint the link.
 No `npm install` step is needed inside the plugin directory — nothing there
-requires a `node_modules` to exist.
+requires a `node_modules` to exist. This holds for the npm-installed
+(bundle) form only; a symlink into a source checkout needs one-time setup,
+see the caveat under "How the daemon is launched".
 
 ### How the daemon is launched
 
@@ -76,6 +78,16 @@ binary — and instead resolves, in order:
 3. `node` on `PATH` — combined with the server form found in the package:
    `dist/server.mjs` (bundle, published form) if present, otherwise
    `packages/server/src/main.ts` via tsx (source, development form)
+
+Caveat (verified on a fresh machine): the source form silently assumes the
+repo's devDependencies are installed — `tsx` is resolved from `node_modules`,
+and `resolveRuntime` version-checks node but never probes tsx. A source
+symlink into a checkout with neither `dist/server.mjs` nor `node_modules/`
+present therefore fails all paths: the daemon exits during startup (code 1)
+before even creating its state directory, and all you see is a bare
+`spawned server exited during startup` diagnostic. On a new machine, run
+`npm install && npm run build` in the repo once — after that the bundle form
+resolves and no `node_modules` is needed anymore.
 
 If all of that fails you get a structured diagnostic listing every attempt
 plus the host's `PATH` verbatim — the single most useful piece of information
