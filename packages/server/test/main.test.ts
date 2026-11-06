@@ -101,7 +101,7 @@ test("owned + 已有健康实例在服务（锁与实例脱钩异常态）→ �
   assert.equal(existsSync(serviceFilePath(paths)), true); // 别人的 service.json 不动
 });
 
-// 日志开关（PLAN §9-2 决策：启动时一次决定，默认关闭零写入）。
+// 日志开关。
 // 走 in-use 健康让位分支——该路径必经 log("starting")/log("lock in-use")，是
 // "开关是否写文件"的最短可测路径（serve 分支由 verify-m1 真机覆盖）。
 // 旧实现（log 无条件追加）下"默认不产生 server.log"断言必失败——必失败纪律。

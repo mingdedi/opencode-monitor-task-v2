@@ -1,4 +1,4 @@
-// 阶段 C 真机验收（SERVER-PLAN）：进程管理与注入契约
+// 真机验收：进程管理与注入契约
 //  ① verifyInstance / resolveTarget / verifySessionAlive 真机（真实共享 opencode 服务）
 //  ② sendSynthetic 真机：隔离 probe session + resume:false + 幂等 id 重放 + inbox 可见
 //  ③ wrapper 四态：exit 0 / exit 7 / 组 TERM（signal:15）/ SIGKILL（无文件 → unknown）

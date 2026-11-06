@@ -1,4 +1,4 @@
-// M8 发布构建（PLUGIN-PLAN §三-5 决策）：esbuild --bundle 单文件 dist/server.mjs。
+// M8 发布构建：esbuild --bundle 单文件 dist/server.mjs。
 //
 // 打包范围：packages/server/src/main.ts + @omt/shared（workspace TS 源码，exports 指
 // 向 ./src/index.ts）+ @opencode-ai/sdk（纯 JS fetch 客户端）——运行时需求收敛为
@@ -38,7 +38,7 @@ const result = await build({
   format: "esm",
   target: "node20",
   outfile: path.join(ROOT, "dist", "server.mjs"),
-  packages: "bundle", // SDK + @omt/shared 一并打进单文件（§三-5）
+  packages: "bundle", // SDK + @omt/shared 一并打进单文件
   sourcemap: false,
   minify: false, // 服务端诊断友好：保留可读性，体积不是发布形态的痛点
   logLevel: "info",

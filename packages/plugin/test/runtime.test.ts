@@ -1,4 +1,4 @@
-// resolveRuntime 探测链单测（PLUGIN-PLAN §五-P1 验收：四分支 + 形态切换）
+// resolveRuntime 探测链单测
 // 全部注入 exists/exec/env——无真机、无网络、无文件系统副作用
 import assert from "node:assert/strict";
 import path from "node:path";

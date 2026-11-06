@@ -1,6 +1,6 @@
-// 面板运行时：feed 快照 → 宿主 reactive store → 行模型渲染（v1 panel/view.ts 模式继承）。
+// 面板运行时：feed 快照 → 宿主 reactive store → 行模型渲染。
 //
-// 响应式契约（v1 实证）：宿主把 slot render 包在 solid 渲染上下文里，在 render
+// 响应式契约（真机实证）：宿主把 slot render 包在 solid 渲染上下文里，在 render
 // 路径中读取 storage.memory 返回的 store 即建立订阅——store 更新触发重渲染。
 // 因此本文件的纪律：store 只在 feed tick 回调（渲染路径外）写入，render 路径
 // 纯读取 + 纯函数派生，绝不回写。
@@ -51,7 +51,7 @@ export function createPanel(context: TuiContext, opts: PanelOptions): PanelHandl
 
   const renderLine = (line: Line): unknown => {
     const props: Record<string, unknown> = { children: line.text }
-    // dim 行降调；head/live/warn 保持默认前景色（v1 克制配色：宿主 theme 只信 base/muted）。
+    // dim 行降调；head/live/warn 保持默认前景色（克制配色：宿主 theme 只信 base/muted）。
     // theme token 是宿主的响应式 getter——每次渲染现读，主题热切换即时生效。
     if (line.tone === "dim") {
       const muted = context.theme.text.muted

@@ -1,4 +1,4 @@
-// sweeper 单测（SERVER-PLAN 阶段 G）：TTL 终态清理、坏 meta exit 佐证、保守不删、
+// sweeper 单测：TTL 终态清理、坏 meta exit 佐证、保守不删、
 // parked/活态不清、清后 registry 移除。clock 经 meta.updated_at / 文件 mtime 构造，
 // 不注入时间（TTL 用远未来/远过去时间戳表达）。
 import assert from "node:assert/strict";
@@ -89,7 +89,7 @@ test("终态 TTL：过期清 + registry 移除；未到保留；活态/parked �
   }
 });
 
-test("坏 meta：有 exit 佐证按 exit mtime 同 TTL 清；无佐证保守不删（§2.9-6）", () => {
+test("坏 meta：有 exit 佐证按 exit mtime 同 TTL 清；无佐证保守不删", () => {
   // 坏 meta + 老 exit（mtime 拨到 TTL 外）
   const oldExit = initTaskDir(env, "mon_swbadold06");
   writeFileSync(oldExit.meta, "{ broken", { mode: 0o600 });
@@ -109,5 +109,5 @@ test("坏 meta：有 exit 佐证按 exit mtime 同 TTL 清；无佐证保守不�
   assert.equal(r.keptUnverifiable, 1);
   assert.ok(!existsSync(oldExit.dir), "bad meta with stale exit witness removed");
   assert.ok(existsSync(newExit.dir), "bad meta with fresh exit kept");
-  assert.ok(existsSync(noExit.dir), "bad meta without exit kept forever (§2.9-6)");
+  assert.ok(existsSync(noExit.dir), "bad meta without exit kept forever");
 });

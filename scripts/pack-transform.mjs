@@ -1,4 +1,4 @@
-// 发布形态转换（M8）：pack/publish 时剥离 package.json 的 workspaces 字段。
+// 发布形态转换：pack/publish 时剥离 package.json 的 workspaces 字段。
 //
 // 动机：workspaces 是 monorepo 开发概念；发布 tarball 里它会让 npm 在安装侧把
 // packages/* 当 workspace 解析（包内无对应 package.json），实测触发

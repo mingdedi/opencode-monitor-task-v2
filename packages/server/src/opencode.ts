@@ -1,16 +1,16 @@
-// §1.3 官方契约封装层——服务端对 opencode 的一切交互唯一入口（PLAN §1.3 / §2.8）
+// 官方契约封装层——服务端对 opencode 的一切交互唯一入口
 // 分层纪律（M0 实测结论，docs/CONTRACT.md）：
 //   · @opencode-ai/sdk（唯一运行时依赖，v2 client）覆盖其已生成方法：
 //     GET /api/session/:id（verifySessionAlive）
-//   · SDK 滞后未生成的端点按 §1.2.1 契约手写薄封装：GET /api/info、POST synthetic、
+//   · SDK 滞后未生成的端点按 spec 契约手写薄封装：GET /api/info、POST synthetic、
 //     GET inbox（SDK v2 client 无此三方法；SDK 补齐后在本文件一处切换）
 //   · 实测语义：delivery 必须显式传（省略时服务端默认 steer——lifecycle 恒 queue 依赖此纪律）；
 //     404 判据 = status 404 或 _tag==="SessionNotFoundError"；409 按可重试；幂等 id 真去重
-// 凭证纪律（§2.8.1）：password 每次使用前从对应 service.json 现读，零缓存、永不落盘；
+// 凭证纪律：password 每次使用前从对应 service.json 现读，零缓存、永不落盘；
 //   注册表内容即白名单——传入端口必须命中表内条目 url，且 pid 活 + /api/info 通过，
 //   三层校验后才开始执行（模型幻觉端口 / 任意本地服务 fail fast 拒绝）。
 
-// v2 client 从子路径导入（包根入口是 v1 风格客户端，无 v2 命名空间）
+// v2 client 从子路径导入（包根入口是旧版风格客户端，无 v2 命名空间）
 import { createOpencodeClient } from "@opencode-ai/sdk/v2/client";
 import {
   opencodeAuthHeader,
@@ -24,7 +24,7 @@ import type { Delivery } from "@omt/shared";
 import { isPidAlive } from "./spawner.ts";
 
 // ---------------------------------------------------------------------------
-// 实例注册表（防串联白名单，PLAN §2.8.1）
+// 实例注册表
 
 export interface OpencodeRegistry {
   /** 白名单 = 各路径 service.json 的 url；默认共享服务条目 + --opencode-state 追加 */
@@ -129,7 +129,7 @@ export async function probeInstances(
 }
 
 // ---------------------------------------------------------------------------
-// 白名单解析（任务创建 fail fast 与投递前共用，PLAN §2.8.1/§2.8.2）
+// 白名单解析
 
 export type TargetRejectionCode = "PORT_NOT_IN_REGISTRY" | "PID_DEAD" | "UNREACHABLE";
 
@@ -149,7 +149,7 @@ export async function resolveTarget(
   for (const p of registry.servicePaths) {
     let svc: OpencodeService;
     try {
-      svc = readOpencodeService(env, p); // 现读：opencode 重启后 url/password 都会变（§1.2）
+      svc = readOpencodeService(env, p); // 现读：opencode 重启后 url/password 都会变
     } catch {
       continue; // 该路径当前不可用：不命中，继续找下一条
     }
@@ -206,12 +206,12 @@ export async function verifySessionAlive(
     const res = await client.v2.session.get({ sessionID: sessionId });
     return res.response.status === 200;
   } catch {
-    return false; // 网络/超时/异常：保守判不存在（fail fast 语义，PLAN §3.3）
+    return false; // 网络/超时/异常：保守判不存在
   }
 }
 
 // ---------------------------------------------------------------------------
-// POST /api/session/:id/synthetic（SDK 未生成，按 §1.2.1 契约手写）
+// POST /api/session/:id/synthetic（SDK 未生成，按 spec 契约手写）
 
 export type SyntheticFailure = "session-not-found" | "unauthorized" | "invalid" | "retryable";
 
@@ -230,7 +230,7 @@ export interface SyntheticParams {
   delivery: Delivery;
   /** 幂等 id：重试必须复用同 id */
   id?: string;
-  /** false = 仅入收件箱不触发执行（§1.2.1） */
+  /** false = 仅入收件箱不触发执行 */
   resume?: boolean;
 }
 

@@ -1,4 +1,4 @@
-// ensureServer 发现-创建流程单测（PLUGIN-PLAN §五-P1 验收六分支：复用/坏文件/stale/
+// ensureServer 发现-创建流程单测（六分支：复用/坏文件/stale/
 // 活而不响应（含版本不兼容）/spawn 失败/就绪超时）。
 // 全部注入 fetch/spawn/isAlive/resolve + XDG 指向临时目录——无网络、无真机、<2s。
 import assert from "node:assert/strict";

@@ -1,4 +1,4 @@
-// deliver 单测（SERVER-PLAN 阶段 D）：DeliverChain 保序/失败隔离 + deliverNotification
+// deliver 单测：DeliverChain 保序/失败隔离 + deliverNotification
 // 重试语义（retryable 退避、404/400 即返、401 归 retryable、resolveTarget 每次现读）
 // fetch-mock + 隔离 XDG 假 service.json（无网络）
 import assert from "node:assert/strict";
@@ -136,7 +136,7 @@ test("直投成功：首投 200 → ok，messageId 透传，payload 契约（del
   assert.equal(syn.body!.text, job.text);
 });
 
-test("默认重试间隔 = 500/2s/8s（PLAN §2.8.2 常量锚定）", () => {
+test("默认重试间隔 = 500/2s/8s", () => {
   assert.deepEqual(DEFAULT_RETRY_DELAYS_MS, [500, 2000, 8000]);
 });
 

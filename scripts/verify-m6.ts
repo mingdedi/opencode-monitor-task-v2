@@ -1,4 +1,4 @@
-// M6 真机验收（PLAN §7）：TUI 面板数据流——feed 状态机 × format 行模型 × 真实服务端
+// M6 真机验收：TUI 面板数据流——feed 状态机 × format 行模型 × 真实服务端
 //  ① online 空态：服务端就绪 → feed.tick → online + 空任务 → 本 session 面板折叠（零行）
 //  ② 任务行渲染：probe session + createTask → 面板出现 ● 头行/command/计数三行，宽度 ≤ 42
 //  ③ session 视角过滤：别的 session 视角看不到本任务（零行）；全量数据带 other-session 摘要行

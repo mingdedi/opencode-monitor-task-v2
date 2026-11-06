@@ -1,10 +1,10 @@
-// 插件 server part 组装（PLUGIN-PLAN §四）：Plugin.define 包装 + 三 MCP 工具注册（§五-P2）。
+// 插件 server part 组装：Plugin.define 包装 + 三 MCP 工具注册。
 //
-// 纪律（§一-5/§六）：本模块零 bare specifier——@opencode/plugin 的运行时值由根 index.ts
+// 纪律：本模块零 bare specifier——@opencode/plugin 的运行时值由根 index.ts
 // 顶层 import 后作为参数下传（tui.ts 下传 jsx/jsxs 同款模式）；类型用本地 interface
 // 保守描述，P0 真机校准。@omt/shared 经相对路径 import（M6 实证：宿主加载链上 bare
 // 包说明符不可解析）。
-// unload 不触碰任务与服务端（§四纪律 1：cleanup 仅 registration.dispose() 撤销工具注册）。
+// unload 不触碰任务与服务端（cleanup 仅 registration.dispose() 撤销工具注册）。
 
 import { appendFileSync, mkdirSync } from "node:fs";
 import { envFromProcess, stateDir } from "../../shared/src/paths.ts";
@@ -34,14 +34,14 @@ export function definePlugin(plugin?: PluginRuntime): unknown {
   const def: PluginDefinition = {
     id: "opencode-monitor-task",
     async setup(ctx) {
-      // 三 MCP 工具注册（PLUGIN-PLAN §五-P2）：ctx.tool.transform 缺席时留痕跳过——
-      // 注册失败的最坏结果是"无工具"，绝不拖垮宿主（§1.3-5 豁免区边界）。
-      // 不在此拉起服务端：按需拉起是唯一生命周期（PLAN §2.1），ensureServer 在每次
-      // 工具 execute 内统一走发现-创建（§四纪律 2）。
+      // 三 MCP 工具注册：ctx.tool.transform 缺席时留痕跳过——
+      // 注册失败的最坏结果是"无工具"，绝不拖垮宿主。
+      // 不在此拉起服务端：按需拉起是唯一生命周期，ensureServer 在每次
+      // 工具 execute 内统一走发现-创建。
       const reg = await registerTools(ctx, { log: debugLog });
       debugLog(reg ? "server part setup (3 tools registered)" : "server part setup (no tool registration path — skipped)");
       return () => {
-        reg?.dispose(); // unload 仅撤销插件自身注册物，不触碰任务与服务端（§四纪律 1）
+        reg?.dispose(); // unload 仅撤销插件自身注册物，不触碰任务与服务端
         debugLog("server part cleanup");
       };
     },

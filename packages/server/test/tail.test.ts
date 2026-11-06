@@ -1,4 +1,4 @@
-// LogTail 单测（SERVER-PLAN 阶段 D）：真文件 append + 轮询读；
+// LogTail 单测：真文件 append + 轮询读；
 // 多字节边界（StringDecoder）、partial 行跨 poll 保留、行安全 offset 语义
 import assert from "node:assert/strict";
 import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -76,26 +76,26 @@ test("行安全 offset：last_offset 语义（总读字节 - pendingBytes）", a
   assert.equal(r.bytesConsumed, 10);
   assert.equal(10 - t.pendingBytes(), 6);
   t.close();
-  // 从行安全点重开（G 阶段 reattach 语义）：不丢不重不拼残行
+  // 从行安全点重开：不丢不重不拼残行
   const t2 = new LogTail(logPath, 6);
   appendFileSync(logPath, "ial2\n");
   assert.deepEqual(t2.poll().lines, ["partial2"]);
   t2.close();
 });
 
-test("大 chunk：超过单次读缓冲（64KB）循环读尽；无换行长行按 v1 语义截断 2000 字符", async () => {
+test("大 chunk：超过单次读缓冲（64KB）循环读尽；无换行长行截断 2000 字符", async () => {
   const t = new LogTail(newLog());
   const big = `${"y".repeat(70_000)}\n`;
   appendFileSync(logPath, big);
   const r = t.poll();
   assert.equal(r.lines.length, 1);
   assert.ok(r.lines[0]!.startsWith("y".repeat(LIMITS.lineMaxChars)), "cleanLine 单行截断语义");
-  assert.ok(r.lines[0]!.endsWith("…[truncated]"), "截断标记（v1 资产）");
+  assert.ok(r.lines[0]!.endsWith("…[truncated]"), "截断标记");
   assert.equal(r.bytesConsumed, Buffer.byteLength(big));
   t.close();
 });
 
-test("flushPending：无换行残余强制成行（v1 attached flushBuffer 资产——临终输出不丢）", async () => {
+test("flushPending：无换行残余强制成行（临终输出不丢）", async () => {
   const t = new LogTail(newLog());
   appendFileSync(logPath, "line1\npartial-no-newline");
   const r = t.poll();
@@ -107,14 +107,14 @@ test("flushPending：无换行残余强制成行（v1 attached flushBuffer 资�
   t.close();
 });
 
-test("64KB 软换行（SERVER-PLAN 阶段 E）：未成行残余超阈值强制成行，pending 清空", async () => {
+test("64KB 软换行：未成行残余超阈值强制成行，pending 清空", async () => {
   const t = new LogTail(newLog());
   // 一次写入 64KB+1 无换行 → 软换行立即触发（poll 内判定）
   appendFileSync(logPath, "z".repeat(LIMITS.softWrapBytes + 1));
   const r1 = t.poll();
   assert.equal(r1.lines.length, 1, "残余超限强制成行");
   assert.ok(r1.lines[0]!.startsWith("z".repeat(LIMITS.lineMaxChars)), "软换行行同样过 cleanLine 截断");
-  assert.ok(r1.lines[0]!.endsWith("…[truncated]"), "截断标记（v1 资产）");
+  assert.ok(r1.lines[0]!.endsWith("…[truncated]"), "截断标记");
   assert.equal(t.pendingBytes(), 0, "软换行后 pending 清空（该段已消费）");
   t.close();
 });
@@ -130,7 +130,7 @@ test("64KB 软换行边界：恰 64KB 不触发，后续字节仍未成行", asy
   const expected = "a".repeat(LIMITS.softWrapBytes) + "b";
   assert.equal(r2.lines.length, 1);
   assert.ok(r2.lines[0]!.startsWith(expected.slice(0, LIMITS.lineMaxChars)), "前 2000 字符保留");
-  assert.ok(r2.lines[0]!.endsWith("…[truncated]"), "截断标记（v1 资产）");
+  assert.ok(r2.lines[0]!.endsWith("…[truncated]"), "截断标记");
   t.close();
 });
 

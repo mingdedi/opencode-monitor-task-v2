@@ -1,11 +1,11 @@
-// M8 权限审计复验（PLAN §4 / §7-M8：权限审计[0700/600/日志内容]）。
+// M8 权限审计复验。
 //
 // 场景（真机实证，非静态检查——每项断言都建立在真实运行产物上）：
 //  ① 启动即权限：state/data 根目录 0700（umask 防御：显式 chmod 追溯已存在目录）
 //  ② service.json / lock 600（凭证文件仅同用户可读）
 //  ③ 任务目录链 0700：tasks/ 与 tasks/<id>/；meta.json 与 log 文件 600
-//  ④ meta.json 无 password 键（凭证永不落盘——只存 opencode_port，PLAN §2.8.1）
-//  ⑤ server.log 不含命令全文（PLAN §4：v1 世界可读日志记命令全文的泄漏面修复）——
+//  ④ meta.json 无 password 键
+//  ⑤ server.log 不含命令全文——
 //     创建带唯一标记的命令任务，日志全文 grep 标记必须零命中
 //  ⑥ plugin/tui 诊断日志落点审计：DEBUG=1 时写入 0700 state 目录内（同 server.log 层，
 //     权限由目录 0700 保证）——脚本内静态断言代码路径的 mkdir mode（不真跑宿主）
@@ -151,7 +151,7 @@ async function main(): Promise<void> {
   check("③ meta.json 600", modeOf(path.join(taskDir, "meta.json")) === 0o600, `got ${modeOf(path.join(taskDir, "meta.json"))?.toString(8)}`);
   check("③ 任务 log 600", modeOf(path.join(taskDir, "log")) === 0o600, `got ${modeOf(path.join(taskDir, "log"))?.toString(8)}`);
 
-  // ④ meta.json 无凭证字段（PLAN §2.8.1：password 每次现读，永不落盘）
+  // ④ meta.json 无凭证字段
   const meta = JSON.parse(readFileSync(path.join(taskDir, "meta.json"), "utf8")) as Record<string, unknown>;
   check("④ meta.json 无 password 键", !("password" in meta), `keys: ${Object.keys(meta).join(",")}`);
   check("④ meta.json 无 auth 键", !("auth" in meta) && !("token" in meta), `keys: ${Object.keys(meta).join(",")}`);

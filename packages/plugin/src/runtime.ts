@@ -1,4 +1,4 @@
-// 服务端运行时解析（PLUGIN-PLAN §三-5 探测链，单点切换源码/bundle 两形态）
+// 服务端运行时解析
 //
 // 背景（2026-11-05 实测）：opencode 2.2.5 CLI 为 bun compile 单文件二进制——插件代码
 // 运行于宿主进程内，process.execPath = opencode.exe（非 node），verify-m1 式的
@@ -13,7 +13,7 @@
 //   ③ 形态探测（dist/server.mjs → bundle；packages/server/src/main.ts → source）
 //      + node 解析（OMT_NODE 优先，回落 PATH "node"；--version 可执行且 major ≥ 20）
 //   ④ 全失败 → 结构化诊断：逐条尝试结果 + 宿主 PATH 原文（fnm/nvm multishell 场景唯一
-//      可远程定位的信息）+ 安装指引——绝不静默（§三-4）
+//      可远程定位的信息）+ 安装指引——绝不静默
 
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";

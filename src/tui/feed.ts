@@ -1,16 +1,16 @@
-// 面板数据源：服务发现 + HTTP 轮询 + offline 状态机（PLAN §3.5）。
+// 面板数据源：服务发现 + HTTP 轮询 + offline 状态机。
 //
-// v2 与 v1 的根本差异：数据源从"跨进程文件桥 + 5s 心跳"换成直连服务端 HTTP
-// （MonitorClient.listTasks，SDK 即契约）——心跳机制退役，health/请求成败即心跳。
-// 每轮 tick 都重读 service.json（服务端重启后 url/password 必变，PLAN §2.1），
+// 数据源直连服务端 HTTP（MonitorClient.listTasks，SDK 即契约）
+// ——心跳机制退役，health/请求成败即心跳。
+// 每轮 tick 都重读 service.json，
 // url 或 password 变化即重建 client，服务端重启对面板是透明的自愈过程。
 //
-// offline 判定链（PLAN §2.1 发现流程的展示端镜像）：
+// offline 判定链：
 //   service.json 不存在        → offline(no-service-file)：服务端从未启动
 //   listTasks 网络失败 + pid 死 → offline(pid-dead)：stale service.json，等待下次
 //                                工具调用按需拉起（TUI 绝不自己 spawn 服务端）
 //   listTasks 失败 + pid 活     → unreachable：活进程不响应/鉴权拒绝，诊断信息
-//                                必须上屏（"不哑跑"哲学，PLAN §0.1 P1）
+//                                必须上屏
 import { MonitorApiError, MonitorClient } from "../../packages/shared/src/client.ts"
 import { envFromProcess, serviceFilePath, stateDir } from "../../packages/shared/src/paths.ts"
 import type { PublicInfo, ServiceFile } from "../../packages/shared/src/types.ts"
@@ -186,7 +186,7 @@ export function createFeed(deps: FeedDeps): Feed {
   }
 }
 
-/** TUI 诊断日志：DEBUG=1 时落 state 目录（与服务端开关同名，PLAN §4 权限纪律）。 */
+/** TUI 诊断日志：DEBUG=1 时落 state 目录。 */
 export function createDebugLog() {
   const enabled = process.env["DEBUG"] === "1"
   return (msg: string): void => {

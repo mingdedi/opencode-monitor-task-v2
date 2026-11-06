@@ -1,17 +1,16 @@
-// 服务端入口（PLAN §2.1 / §6.1；SERVER-PLAN 阶段 B 最小版 + 阶段 C 注册表接线 + 阶段 D 任务闭环
-// + 阶段 F 管理端点 + 阶段 G 恢复与加固）
+// 服务端入口
 // 职责：platform gate → 单实例锁（O_EXCL，内容含 pid）→ 127.0.0.1 随机端口监听
-//       → service.json 600 原子写 → 信号处理（默认不杀任务，PLAN §2.1 退出语义；
+//       → service.json 600 原子写 → 信号处理（默认不杀任务；
 //         --shutdown-all / kill_tasks=true 时击杀全部任务进程组）
 //       → 日志落 state 目录（默认关闭；--debug / DEBUG=1 启动时开启，开启后也不记
-//         命令全文，PLAN §4 / §9-2 决策：日志是启动时决定的 debug 选项，不做轮转）
-//       → opencode 实例注册表（--opencode-state 多条目，§2.8.1；health 实例表实测）
-//       → 任务注册表 + 任务端点装配（阶段 D：POST /api/tasks + GET 列表/详情；
-//         阶段 F：stop/keepalive/PATCH/DELETE/log + session 上限/registry 驱逐；
-//         阶段 G：reattach 认领 + pending 重投 + sweeper TTL + /api/shutdown +
+//         命令全文；日志是启动时决定的 debug 选项，不做轮转）
+//       → opencode 实例注册表（--opencode-state 多条目；health 实例表实测）
+//       → 任务注册表 + 任务端点装配（POST /api/tasks + GET 列表/详情；
+//         stop/keepalive/PATCH/DELETE/log + session 上限/registry 驱逐；
+//         reattach 认领 + pending 重投 + sweeper TTL + /api/shutdown +
 //         列表/详情与 TaskStore 合并视图——parked 与终态从 store 出）
 //
-// 创建竞态语义（PLAN §2.1-4）：先原子抢锁 → in-use 后到者核对/等待已有 service.json 的 health，
+// 创建竞态语义：先原子抢锁 → in-use 后到者核对/等待已有 service.json 的 health，
 // 健康则打印后退出码 0（后到者自然退出，service.json 由最终存活者持有）；死持锁者可抢。
 
 import { randomBytes, randomUUID } from "node:crypto";
@@ -59,17 +58,17 @@ export const SERVER_VERSION: string = (
 /** 后到者等待持锁者就绪的上限（持锁者经 tsx 冷启动，留足余量） */
 const WAIT_HOLDER_MS = 8000;
 const WAIT_POLL_MS = 250;
-/** 对已有实例的 health 探测超时（PLAN §2.1-2） */
+/** 对已有实例的 health 探测超时 */
 const PROBE_TIMEOUT_MS = 1000;
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 // ---------------------------------------------------------------------------
-// 单实例锁（PLAN §2.1-4；SERVER-PLAN §一：锁文件内容含 pid，死持锁者可抢）
+// 单实例锁
 
-/** 探活：kill(pid,0) + /proc state 字母纠错（Z 僵尸按死——PLAN §2.3 三件套之二的锁内简化版；
- *  任务进程的 (pid, starttime) 双因子版在 spawner.ts（阶段 C））。
- *  /proc stat 解析从最后一个 ')' 之后取字段（comm 可含空格/括号，SERVER-PLAN §一 spawner 要点）。 */
+/** 探活：kill(pid,0) + /proc state 字母纠错（Z 僵尸按死；锁内简化版——
+ *  任务进程的 (pid, starttime) 双因子版在 spawner.ts）。
+ *  /proc stat 解析从最后一个 ')' 之后取字段。 */
 export function lockIsPidAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
@@ -140,10 +139,10 @@ export function acquireLock(lockPath: string, deps: LockDeps = {}): LockResult {
 }
 
 // ---------------------------------------------------------------------------
-// 服务端自身 service.json（与 opencode service.json 同构，PLAN §2.1）
+// 服务端自身 service.json
 
 export function writeServiceFile(env: PathEnv, svc: ServiceFile): void {
-  ensurePrivateDir(stateDir(env)); // 导出自洽：state 根目录 0700（PLAN §4）
+  ensurePrivateDir(stateDir(env)); // 导出自洽：state 根目录 0700
   writeFileAtomic(serviceFilePath(env), `${JSON.stringify(svc, null, 2)}\n`);
 }
 
@@ -157,7 +156,7 @@ export function readServiceFile(env: PathEnv): ServiceFile | null {
 // ---------------------------------------------------------------------------
 // 对已有实例的探测与实例表
 
-/** 对已有实例探测 health（auth 按 service.json 的 password；PLAN §2.1-2 语义） */
+/** 对已有实例探测 health */
 export async function probeExisting(svc: ServiceFile): Promise<{ ok: boolean; version?: string }> {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), PROBE_TIMEOUT_MS);
@@ -243,7 +242,7 @@ export async function main(
   env: NodeJS.ProcessEnv = process.env,
   deps: MainDeps = {},
 ): Promise<MainResult> {
-  // platform gate（PLAN §9-4：Windows 不支持，统一前置校验）
+  // platform gate
   if (process.platform === "win32") {
     process.stderr.write("opencode-monitor-task server: unsupported platform win32 (linux/macOS only)\n");
     return { code: 1 };
@@ -253,12 +252,12 @@ export async function main(
   const shutdownAll = argv.includes("--shutdown-all");
   const opencodeStatePaths = parseOpencodeStateArgs(argv);
   // 日志开关：启动时一次决定（--debug 参数或 DEBUG=1 env，任一即开），运行中不变。
-  // 默认关闭——零写入、server.log 不创建（§9-2 决策：日志是 debug 选项而非常设设施；
-  // 不做轮转，磁盘占用问题随默认关闭一起消解）。开启后也不记命令全文（PLAN §4 红线）。
+  // 默认关闭——零写入、server.log 不创建（日志是 debug 选项而非常设设施；
+  // 不做轮转，磁盘占用问题随默认关闭一起消解）。开启后也不记命令全文。
   const logOn = argv.includes("--debug") || env["DEBUG"] === "1";
   const logPath = serverLogPath(paths);
 
-  // 单文件追加（SERVER-PLAN §三-6 原轮转决策被 §9-2 开关决策取代；health 暴露 log_bytes）；
+  // 单文件追加；
   // 关键事件 + DEBUG 行同闸：开关的目的就是 debug，无需两级独立控制
   const log = (msg: string): void => {
     if (!logOn) return;
@@ -274,25 +273,25 @@ export async function main(
 
   ensurePrivateDir(stateDir(paths));
   log(`starting version=${SERVER_VERSION} argv=[${argv.join(" ")}]`);
-  if (shutdownAll) log("--shutdown-all: all task process groups will be killed on exit (PLAN §2.1)");
+  if (shutdownAll) log("--shutdown-all: all task process groups will be killed on exit");
   const knownArgs = new Set(["--shutdown-all", "--debug", "--opencode-state", ...opencodeStatePaths]);
   for (const a of argv) {
     if (!knownArgs.has(a)) log(`note: unrecognized arg '${a}' ignored (future stages may accept it)`);
   }
 
-  // opencode 实例注册表（§2.8.1 白名单：默认共享服务 + --opencode-state 追加，路径去重）
+  // opencode 实例注册表（默认共享服务 + --opencode-state 追加，路径去重）
   const ocRegistry: OpencodeRegistry = buildRegistry(paths, opencodeStatePaths);
   if (opencodeStatePaths.length > 0) {
     log(`opencode registry: default + ${opencodeStatePaths.length} extra --opencode-state path(s)`);
   }
 
-  // 任务注册表（阶段 D：簿记 + health 计数 + 端点聚合；F 阶段加上限/驱逐，G 加 store 合并视图）
+  // 任务注册表：簿记 + health 计数 + 端点聚合 + session 上限/终态驱逐 + store 合并视图
   const tasks = new TaskRegistry();
 
-  // Monitor 依赖共享装配（createTask 与 G 阶段 reattach/pending 重投同源——tick/重试参数一致）
+  // Monitor 依赖共享装配（createTask 与 reattach/pending 重投同源——tick/重试参数一致）
   const monitorBase: MonitorDeps = { env: paths, ocRegistry, log };
 
-  // reattach 状态（§2.9-5 P1 根治：认领结果显式化——health 可见、失败可懒重试）
+  // reattach 状态（认领结果显式化——health 可见、失败可懒重试）
   let reattachRan = false;
   let reattachInFlight = false;
   let reattachInfo: HealthInfo["reattach"] = null;
@@ -320,8 +319,8 @@ export async function main(
   log(`lock ${lock.kind}${lock.kind === "in-use" ? ` (holder pid ${lock.holderPid})` : ""}`);
 
   if (lock.kind === "in-use") {
-    // 后到者：核对/等待持锁者就绪，健康则退出码 0（PLAN §2.1-4 后到者自然退出）。
-    // version 裁定与 owned-防御分支统一：health ok 但 version 缺失或 major.minor 不兼容 → 不可信，
+    // 后到者：核对/等待持锁者就绪，健康则退出码 0。
+    // version 判定与 owned-防御分支统一：health ok 但 version 缺失或 major.minor 不兼容 → 不可信，
     // 拒绝双开退出 1（本服务端 health 恒带 version；缺字段说明对端不是正常实例）
     debug(`waiting for holder to become healthy (≤${WAIT_HOLDER_MS}ms)`);
     const waitMs = deps.waitHolderMs ?? WAIT_HOLDER_MS;
@@ -392,8 +391,8 @@ export async function main(
   const startedAt = Date.now();
   debug(`identity id=${id}`);
 
-  // health 数据源：实例表每次现读 + verifyInstance 实测（§2.8.1——url/password 会变，绝不缓存）；
-  // reattach 懒触发（PLAN §2.9：health 被询问前——启动扫描异常时每轮 health 兜底重试）
+  // health 数据源：实例表每次现读 + verifyInstance 实测；
+  // reattach 懒触发
   const health = async (): Promise<HealthInfo> => {
     runReattach();
     let logBytes = 0;
@@ -408,15 +407,15 @@ export async function main(
       uptime_s: Math.floor((Date.now() - startedAt) / 1000),
       tasks_alive: tasks.aliveCount(),
       tasks_total: tasks.size,
-      reattach: reattachInfo, // G 阶段接入（PLAN §2.9-5）：null = 尚未完成
+      reattach: reattachInfo, // null = 尚未完成
       opencode_instances: await probeInstances(ocRegistry, paths),
       log_bytes: logBytes,
     };
   };
 
-  // 任务端点装配（阶段 D：创建 + 列表 + 详情；阶段 F：+ stop/keepalive/PATCH/DELETE/log；
-  // 阶段 G：+ /api/shutdown、列表/详情与 TaskStore 合并视图——registry 驱逐或崩溃恢复后
-  // 目录仍在 TTL 内的终态/parked 任务从 store 补齐（PLAN §2.2 "registry 与 TaskStore 合并视图"）。
+  // 任务端点装配：创建 + 列表 + 详情 + stop/keepalive/PATCH/DELETE/log +
+  //  /api/shutdown、列表/详情与 TaskStore 合并视图——registry 驱逐或崩溃恢复后
+  // 目录仍在 TTL 内的终态/parked 任务从 store 补齐。
   // 管理端点（stop/keepalive/PATCH/log）只对在册 Monitor 实例有效——parked 与 store 终态 404
   const asMonitor = (id: string): Monitor | null => {
     const t = tasks.get(id);
@@ -557,10 +556,10 @@ export async function main(
   writeServiceFile(paths, svc);
   log(`listening at ${svc.url} (service.json written)`);
 
-  // --- 阶段 G 启动件 ---
-  // reattach：认领崩溃前任务（§2.9）；health 懒触发兜底（启动扫描异常时重试）
+  // --- 启动件（reattach / pending 重投 / sweeper） ---
+  // reattach：认领崩溃前任务；health 懒触发兜底（启动扫描异常时重试）
   runReattach();
-  // pending 重投：独立 60s 周期（SERVER-PLAN §三-2，不等 sweeper 的 10min）。
+  // pending 重投：独立 60s 周期。
   // .catch 围栏与 sweeper run() 对齐——生产 deliverNotification 已验证不抛
   // （opencode.ts 全链 catch 为返回值），但 uncaughtException → exit(1) 姿态下
   // 未来任何逃逸异常都不该经此拖垮服务端
@@ -576,7 +575,7 @@ export async function main(
       });
   const pendingTimer = setInterval(() => void runPendingRetry(), LIMITS.pendingRetryMs);
   pendingTimer.unref?.();
-  // sweeper：TTL 清理（启动必扫 + 每 10min，PLAN §2.10）。启动时序（Review 修复）：
+  // sweeper：TTL 清理。启动时序（Review 修复）：
   // 首轮 pending 重投完成后才做启动必扫（recoveryThenSweep）——顺序颠倒会在长停机
   // 重启场景先删掉带 pending.json 的 TTL 过期目录，结局通知一次未试即永久丢失；
   // 重投全程有界（逐条 ≤4 次尝试），延迟首扫无害（被清的都是早已过期的目录）
@@ -584,8 +583,8 @@ export async function main(
     startSweeper(paths, tasks, log).unref?.();
   });
 
-  // 信号处理：SIGTERM/SIGINT 优雅退出；默认不杀任务——任务自成进程组（PLAN §2.1 退出语义）。
-  // --shutdown-all（PLAN §2.1"显式参数才击杀全部任务进程组"）：先 requestStop 全部活任务再退。
+  // 信号处理：SIGTERM/SIGINT 优雅退出；默认不杀任务——任务自成进程组。
+  // --shutdown-all：先 requestStop 全部活任务再退。
   // kill -9 无法清理 → service.json/lock 残留 = 发现流程的 stale 路径，此为设计内行为
   // （任务进程照跑，重启 reattach 认领——P1 的结构性根治）。
   let exiting = false;

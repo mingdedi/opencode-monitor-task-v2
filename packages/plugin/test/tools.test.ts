@@ -1,4 +1,4 @@
-// 三工具单测（PLUGIN-PLAN §五-P2 验收：参数转发断言/默认化逻辑/错误映射/防呆提前失败）
+// 三工具单测
 // 全部注入 ensureServer/makeClient/env——无网络、无真机、无服务端进程。
 // 插件注册形状（ctx.tool.transform）不在本文件：tools.ts 的 registerTools 留给 P0/P3 真机。
 import assert from "node:assert/strict";

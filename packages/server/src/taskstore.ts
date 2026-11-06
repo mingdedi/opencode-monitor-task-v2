@@ -1,8 +1,8 @@
-// 任务持久化层（PLAN §2.3 / §6.1）：tasks/<id>/{meta.json, log, exit, pending.json}
-// 兼载服务端持久化基础设施：原子写（v1 资产 tmp+rename+tmpSeq）与 0700 私有目录（PLAN §4）
+// 任务持久化层：tasks/<id>/{meta.json, log, exit, pending.json}
+// 兼载服务端持久化基础设施：原子写与 0700 私有目录
 // ——main.ts 的 service.json 写入复用这两件工具。
-// 阶段 B 基础版：无 TTL 清理（G 阶段 sweeper）、pending.json 仅落位路径（D+ deliver 使用）。
-// 阶段 G：pending 落盘通知读写 + StoredTaskView（meta 直出 registry 视图——reattach 死任务
+// TTL 清理在 sweeper.ts；pending.json 为投递耗尽后的落盘通知；
+// StoredTaskView：meta 直出 registry 视图（reattach 死任务
 // 收尾与 parked 认领失败的无 Monitor 数据源）。
 
 import {
@@ -25,7 +25,7 @@ import type { TaskView } from "./registry.ts";
 
 let tmpSeq = 0;
 
-/** 原子写：tmp + rename（v1 资产）；tmpSeq 后缀防同进程并发撞名 */
+/** 原子写：tmp + rename；tmpSeq 后缀防同进程并发撞名 */
 export function writeFileAtomic(path: string, data: string, mode: 0o600 | 0o400 = 0o600): void {
   const tmp = `${path}.${process.pid}.${tmpSeq++}.tmp`;
   writeFileSync(tmp, data, { mode });
@@ -33,14 +33,14 @@ export function writeFileAtomic(path: string, data: string, mode: 0o600 | 0o400 
   renameSync(tmp, path);
 }
 
-/** 0700 私有目录（PLAN §4：state/data 两根目录）；已存在时显式 chmod（mkdir mode 不追溯生效） */
+/** 0700 私有目录；已存在时显式 chmod（mkdir mode 不追溯生效） */
 export function ensurePrivateDir(path: string): void {
   mkdirSync(path, { recursive: true, mode: 0o700 });
   chmodSync(path, 0o700);
 }
 
 // ---------------------------------------------------------------------------
-// 任务目录布局与 meta（PLAN §2.3，跨重启真相源，schema 版本化）
+// 任务目录布局与 meta
 
 export interface TaskMeta {
   schema: 1;
@@ -53,7 +53,7 @@ export interface TaskMeta {
   opencode_port: number;
   pid: number | null;
   pgid: number | null;
-  /** /proc/<pid>/stat starttime——pid 复用防御（spawner 阶段 C 写入） */
+  /** /proc/<pid>/stat starttime——pid 复用防御（spawner 写入） */
   proc_start_time: number | null;
   started_at: number;
   directory: string;
@@ -71,9 +71,9 @@ export interface TaskMeta {
   events_dropped: number;
   state: TaskState;
   exit_info: ExitInfo | null;
-  /** idle 两段式裁决（PLAN §2.7）：idle 态 = 宽限期截止 epoch ms（宽限 = 一个完整
-   *  idle_timeout_ms 窗口，SERVER-PLAN §三-5）；非 idle 恒 null。G 阶段 reattach
-   *  按"无观察者不计时，重挂后从零武装"（PLAN §2.9-4）——恢复时不沿用旧值 */
+  /** idle 两段式裁决：idle 态 = 宽限期截止 epoch ms（宽限 = 一个完整
+   *  idle_timeout_ms 窗口）；非 idle 恒 null。reattach 按"无观察者不计时，
+   *  重挂后从零武装"——恢复时不沿用旧值 */
   grace_deadline: number | null;
   /** 当前看护进程 pid——双认领防御 */
   claimed_by: number;
@@ -89,7 +89,7 @@ export interface TaskFilePaths {
   log: string;
   /** wrapper EXIT-trap 写入的退出码 */
   exit: string;
-  /** 投递失败落盘通知（PLAN §2.8.2），D+ 阶段 deliver 使用 */
+  /** 投递失败落盘通知，D+ 阶段 deliver 使用 */
   pending: string;
 }
 
@@ -112,7 +112,7 @@ export function writeMeta(env: PathEnv, meta: TaskMeta): void {
 }
 
 /**
- * 读 meta；不存在返回 null；存在但坏 JSON 抛错（G 阶段 reattach 据此走"坏 meta 保守不删"路径）
+ * 读 meta；不存在返回 null；存在但坏 JSON 抛错
  */
 export function readMeta(env: PathEnv, id: string): TaskMeta | null {
   const p = taskFilePaths(env, id);
@@ -129,7 +129,7 @@ export function readExitFile(env: PathEnv, id: string): string | null {
   }
 }
 
-/** 扫 tasks/ 下全部任务目录 id（reattach 起点，PLAN §2.9-1） */
+/** 扫 tasks/ 下全部任务目录 id */
 export function listTaskIds(env: PathEnv = envFromProcess()): string[] {
   try {
     return readdirSync(tasksDir(env), { withFileTypes: true })
@@ -142,7 +142,7 @@ export function listTaskIds(env: PathEnv = envFromProcess()): string[] {
 }
 
 // ---------------------------------------------------------------------------
-// pending 落盘通知（PLAN §2.8.2 降级链末段：重试耗尽 → 落盘 → 60s 周期重投）
+// pending 落盘通知
 // 条目自包含投递参数快照（session/port 不依赖 meta 可读——meta 可能损坏或正被改写）。
 
 export interface PendingEntry {
@@ -208,9 +208,9 @@ export function appendPending(env: PathEnv, id: string, entry: PendingEntry, max
 }
 
 // ---------------------------------------------------------------------------
-// StoredTaskView：从 meta 直接构造的 registry 视图（G 阶段）
+// StoredTaskView：从 meta 直接构造的 registry 视图
 // —— reattach 收尾的死任务（终态）与 parked（认领失败）无 Monitor 实例，
-//    /api/tasks 合并视图的 store 侧数据源（PLAN §2.2/§2.9-5；registry 只认 TaskView）
+//    /api/tasks 合并视图的 store 侧数据源
 
 /** meta → PublicInfo（与 Monitor.toPublicInfo 同源构造，单一真源防双处分叉） */
 export function metaToPublicInfo(meta: TaskMeta, now: () => number = Date.now): PublicInfo {

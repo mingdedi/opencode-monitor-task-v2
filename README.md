@@ -153,20 +153,20 @@ npm test
 npm run build                              # esbuild bundle → dist/server.mjs
 node --import tsx scripts/fetch-spec.ts      # refresh OpenAPI snapshot
 node --import tsx scripts/probe-synthetic.ts # verify runtime semantics
-node --import tsx scripts/verify-m1.ts       # discovery/spawn/race acceptance (M1)
-node --import tsx scripts/verify-m2-pre.ts   # synthetic contract probe (M2-pre)
-node --import tsx scripts/verify-m2.ts       # minimal closed loop (M2)
-node --import tsx scripts/verify-m4.ts       # idle adjudication + management (M4)
-node --import tsx scripts/verify-m5.ts       # crash recovery / reattach (M5)
-node --import tsx scripts/verify-m6.ts       # TUI dataflow acceptance (M6)
-node --import tsx scripts/verify-m7.ts       # plugin-tools acceptance (M7)
-node --import tsx scripts/verify-m8.ts       # permission audit acceptance (M8)
-node --import tsx scripts/storm-sim.ts       # notification-storm simulation (M3 payload)
+node --import tsx scripts/verify-m1.ts       # discovery/spawn/race acceptance
+node --import tsx scripts/verify-m2-pre.ts   # synthetic contract probe
+node --import tsx scripts/verify-m2.ts       # minimal closed loop
+node --import tsx scripts/verify-m4.ts       # idle adjudication + management
+node --import tsx scripts/verify-m5.ts       # crash recovery / reattach
+node --import tsx scripts/verify-m6.ts       # TUI dataflow acceptance
+node --import tsx scripts/verify-m7.ts       # plugin-tools acceptance
+node --import tsx scripts/verify-m8.ts       # permission audit acceptance
+node --import tsx scripts/storm-sim.ts       # notification-storm simulation
 ```
 
 All `verify-*` and `storm-sim` scripts resolve the server form the same way
 the plugin does (`scripts/lib/server-entry.ts`): with `dist/server.mjs`
-present they exercise the **bundle**, without it the **source** form — the M8
+present they exercise the **bundle**, without it the **source** form — the release
 gate requires the full set green in both forms (same criteria, zero drift).
 
 ### Local install (development)

@@ -1,12 +1,12 @@
-// M7 真机验收（PLUGIN-PLAN §五-P3）：插件 MCP 工具三件套——六场景固化为可重跑断言。
+// M7 真机验收：插件 MCP 工具三件套——六场景固化为可重跑断言。
 // 手工记分板（commit 706cc4a，2026-11-05 活宿主全绿）的脚本化，此后回归一跑即验。
 //
-//  ① 注册接线：官方契约形状（ctx.tool.transform + editor.add，§一-3）的宿主 ctx 调
+//  ① 注册接线：官方契约形状（ctx.tool.transform + editor.add）的宿主 ctx 调
 //     真实 registerTools → 三工具入册（name/schema/execute 可调）；宿主路径缺失 →
 //     null 留痕跳过（无工具不拖垮宿主）。场景②-⑥ 的执行入口 = 本场景的注册产物
 //     （宿主 add 拿到的同一闭包），而非直接调工具工厂。
 //     [插件锚点] 纯脚本没有 transform 通道——注册路径只存在于宿主形状下。
-//  ② 默认化全链：monitor 不传 session_id/opencode_port（宿主权威默认化，§三-1）→
+//  ② 默认化全链：monitor 不传 session_id/opencode_port（宿主权威默认化）→
 //     pattern 命中 → synthetic 唤醒"当前 session"。verify-m2 必须显式传两参数，
 //     双缺省 + 通知到达正确 session 是插件形态独有断言（首次真实
 //     "工具→服务端→通知→本 session"全链；M2 验收是脚本模拟插件行为）。
@@ -137,7 +137,7 @@ const registered: Array<{ name: string; description: string; input: Record<strin
 const deps: ToolDeps = { env: TOOL_ENV };
 const fakeHostCtx = {
   tool: {
-    // 官方契约形状（PLUGIN-PLAN §一-3，live P3 真宿主实测同形状）：
+    // 官方契约形状：
     // transform(editor => editor.add(spec)) → reg.dispose()
     transform: async (fn: (editor: unknown) => void) => {
       fn({ add: (s: (typeof registered)[number]) => registered.push(s) });

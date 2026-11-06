@@ -1,4 +1,4 @@
-// M1 真机验收（SERVER-PLAN 阶段 B）：
+// M1 真机验收：
 //  ① 发现-创建-复用全流程 + 权限审计（service.json 600 / state 0700 / 锁含 pid）
 //  ② kill -9 后 stale service.json 清理重建
 //  ③ 坏 service.json 清理路径
@@ -6,7 +6,7 @@
 //  ⑤ 持锁者 kill -9 后死锁可抢（新实例接管）
 //  ⑥ 优雅退出（SIGTERM）自清 service.json 与锁
 // 隔离：XDG 指向 /tmp/opencode/omt-verify-m1-<pid>，不触碰真实用户目录。
-// 发现-创建流程为插件端行为（PLAN §2.1）的脚本内联模拟——正式实现属插件端 spawn-server.ts。
+// 发现-创建流程为插件端行为的脚本内联模拟——正式实现属插件端 spawn-server.ts。
 //
 // 用法: node --import tsx scripts/verify-m1.ts
 
@@ -58,7 +58,7 @@ function spawnServer(): ChildProcess {
     cwd: ROOT,
     env: serverEnv,
     stdio: "ignore",
-    detached: true, // 自成进程组（插件端 §2.1-3 同款行为）
+    detached: true, // 自成进程组（与插件端行为一致）
   });
   children.push(child);
   return child;
@@ -105,7 +105,7 @@ function resetState(): void {
   rmSync(`${XDG}/data`, { recursive: true, force: true });
 }
 
-// ---- 发现-创建流程（§2.1 插件端行为模拟）----
+// ---- 发现-创建流程----
 
 async function probe(svc: ServiceFile): Promise<HealthInfo | null> {
   try {
@@ -162,7 +162,7 @@ async function scenario1_discover_create_reuse(): Promise<void> {
   check("①创建: 监听 127.0.0.1 随机端口", first.svc.url.startsWith("http://127.0.0.1:") && !first.svc.url.endsWith(":0"));
   const second = await findOrCreate();
   check("①复用: spawned=false 且同实例", second.spawned === false && second.svc.id === first.svc.id && second.svc.url === first.svc.url);
-  // 权限审计（PLAN §4）
+  // 权限审计
   check("①权限: service.json 600", (statSync(serviceFilePath(pathEnv)).mode & 0o777) === 0o600, String(statSync(serviceFilePath(pathEnv)).mode & 0o777));
   check("①权限: state 目录 0700", (statSync(stateDir(pathEnv)).mode & 0o777) === 0o700);
   const lockStat = statSync(lockFilePath(pathEnv));

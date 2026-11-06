@@ -1,4 +1,4 @@
-// pipeline 纯函数单测（SERVER-PLAN 阶段 D + 阶段 E）：splitLines / cleanLine /
+// pipeline 纯函数单测：splitLines / cleanLine /
 // Matcher pattern 语义 / TokenBucket / Coalescer / formatCoalesced
 import assert from "node:assert/strict";
 import { test } from "node:test";
@@ -14,7 +14,7 @@ test("splitLines：\\n 分行，尾部无换行留 rest", () => {
   assert.equal(r.rest, "world");
 });
 
-test("splitLines：\\r\\n 与 \\r 都成行（进度条 \\r 刷新兼容，v1 语义）", () => {
+test("splitLines：\\r\\n 与 \\r 都成行（进度条 \\r 刷新兼容）", () => {
   const r = splitLines("", "a\r\nb\rc\n");
   assert.deepEqual(r.lines, ["a", "b", "c"]);
   assert.equal(r.rest, "");
@@ -58,7 +58,7 @@ test("cleanLine：trim + 空行（含 ANSI 剥离后变空）→ null", () => {
   assert.equal(cleanLine("\x1b[0m \x1b[2K"), null);
 });
 
-test("cleanLine：超长行截断带 …[truncated] 标记（v1 资产继承——agent 可感知截断）", () => {
+test("cleanLine：超长行截断带 …[truncated] 标记", () => {
   const long = "x".repeat(LIMITS.lineMaxChars + 500);
   const cleaned = cleanLine(long)!;
   assert.ok(cleaned.startsWith("x".repeat(LIMITS.lineMaxChars)), "前 2000 字符保留");
@@ -67,22 +67,22 @@ test("cleanLine：超长行截断带 …[truncated] 标记（v1 资产继承—�
   assert.equal(cleanLine("short"), "short");
 });
 
-test("cleanLine：单字符 ESC 序列剥离（v1 ANSI_SINGLE 资产继承——final byte 范围 @-Z\\^-_）", () => {
+test("cleanLine：单字符 ESC 序列剥离（final byte 范围 @-Z\\^-_）", () => {
   assert.equal(cleanLine("before\x1bMafter"), "beforeafter"); // RI 反向换行（M ∈ @-Z）
   assert.equal(cleanLine("\x1bAup\x1bBdown"), "updown"); // CUU/CUD
   // \x1b7（DECSC，"7" 不在 @-Z 字母区间）不在 ANSI_SINGLE 范围——由 CONTROLS
-  // 兜底剥掉 ESC 本身，数字字面量保留（v1 同款行为，非缺陷）
+  // 兜底剥掉 ESC 本身，数字字面量保留（预期行为，非缺陷）
   assert.equal(cleanLine("\x1b7save"), "7save");
 });
 
-test("cleanLine：C0/C1 控制字符剥离（v1 CONTROLS 资产继承）——二进制噪音不进通知正文", () => {
+test("cleanLine：C0/C1 控制字符剥离——二进制噪音不进通知正文", () => {
   assert.equal(cleanLine("a\x00b\x07c\x0bd\x7fe\x9bf"), "abcdef");
   // 全控制字符行 → 剥净后为空 → null
   assert.equal(cleanLine("\x07\x07"), null);
 });
 
 // ---------------------------------------------------------------------------
-// Matcher（SERVER-PLAN 阶段 E：pattern 过滤语义，v1 emitLine 资产）
+// Matcher
 
 test("makeMatcher：无 pattern / 空串 → null（直通全命中）", () => {
   assert.equal(makeMatcher(null, "pattern"), null);
@@ -95,7 +95,7 @@ test("Matcher pattern 模式：命中 pass+matched，未命中丢弃", () => {
   assert.deepEqual(m.judge("info ok"), { pass: false, matched: false });
 });
 
-test("Matcher all 模式 + pattern：只统计不过滤——未命中放行但不计 matched（PLAN §3.3）", () => {
+test("Matcher all 模式 + pattern：只统计不过滤——未命中放行但不计 matched", () => {
   const m = makeMatcher("ERROR", "all")!;
   assert.deepEqual(m.judge("ERROR boom"), { pass: true, matched: true });
   assert.deepEqual(m.judge("info ok"), { pass: true, matched: false });
@@ -110,7 +110,7 @@ test("Matcher：正则语义生效（锚点/字符类），非 global（test 无
 });
 
 // ---------------------------------------------------------------------------
-// TokenBucket（v1 throttle.ts 资产：突发 5 + 1/s 惰性补充）
+// TokenBucket（突发 5 + 1/s 惰性补充）
 
 test("TokenBucket：突发 5 枚即取尽，第 6 枚拒绝", () => {
   let t = 0;
@@ -137,7 +137,7 @@ test("TokenBucket：惰性补充——静置 1s 恰补 1 枚，2s 补 2 枚，�
 });
 
 // ---------------------------------------------------------------------------
-// Coalescer + formatCoalesced（PLAN §2.5；v1 queueCoalesce/flushCoalesce 资产）
+// Coalescer + formatCoalesced
 
 test("Coalescer：首行开窗 tumbling，到期判定，flush 取走并关窗", () => {
   const c = new Coalescer(500);
@@ -165,7 +165,7 @@ test("Coalescer：pending 上限丢最旧（1000），evicted 计数入 flush", 
   assert.equal(batch.evicted, 2);
 });
 
-test("formatCoalesced：单行/多行头部计数、10 行×200 字符截断、suppressed 计数（v1 语义逐条）", () => {
+test("formatCoalesced：单行/多行头部计数、10 行×200 字符截断、suppressed 计数", () => {
   assert.equal(formatCoalesced({ lines: ["only"], evicted: 0 }), "[1 line coalesced]\nonly");
   const two = formatCoalesced({ lines: ["a", "b"], evicted: 0 });
   assert.ok(two.startsWith("[2 lines coalesced]\na\nb"), two);
@@ -176,7 +176,7 @@ test("formatCoalesced：单行/多行头部计数、10 行×200 字符截断、s
   assert.ok(out12.includes("L10"));
   assert.ok(!out12.includes("L11\n"));
   assert.ok(out12.endsWith("(… 2 more lines suppressed)"), out12);
-  // 单行超 200 字符：截断加省略号（v1 COALESCE_SHOWN_WIDTH）
+  // 单行超 200 字符：截断加省略号
   const long = "x".repeat(LIMITS.coalesceLineChars + 50);
   const outLong = formatCoalesced({ lines: [long], evicted: 0 });
   assert.ok(outLong.includes("x".repeat(LIMITS.coalesceLineChars) + "…"), outLong);

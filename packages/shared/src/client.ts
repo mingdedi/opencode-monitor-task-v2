@@ -1,5 +1,5 @@
 // 服务端 HTTP API 客户端（插件端/TUI 用）——fetch 封装 + Basic auth ("monitor:" + password)
-// 双端共享契约，与服务端 http.ts 端点一一对应（PLAN §2.2）
+// 双端共享契约，与服务端 http.ts 端点一一对应
 
 import type { ApiError, CreateTaskInput, HealthInfo, PublicInfo } from "./types.ts";
 
@@ -13,7 +13,7 @@ export class MonitorApiError extends Error {
 }
 
 /** 构造可选项（fetch 注入便于 TUI/测试替换传输层，默认全局 fetch；
- *  signal 外部取消——插件工具 execute 的 context.signal 穿透，PLUGIN-PLAN §四纪律 5） */
+ *  signal 外部取消——插件工具 execute 的 context.signal 穿透） */
 export interface MonitorClientOptions {
   fetchImpl?: typeof fetch;
   /** 外部取消信号：与每次请求的内部超时并存（任一触发即中止该次 fetch） */

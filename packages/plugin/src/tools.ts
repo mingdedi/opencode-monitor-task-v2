@@ -1,11 +1,11 @@
-// MCP 三工具定义（PLUGIN-PLAN §二/§五-P2）：monitor_server / monitor / monitor_manage。
-// 全部是服务端 HTTP API 的薄封装，插件自身除发现-创建流程外零业务逻辑（§二原则）。
+// MCP 三工具定义：monitor_server / monitor / monitor_manage。
+// 全部是服务端 HTTP API 的薄封装，插件自身除发现-创建流程外零业务逻辑。
 //
-// 测试纪律（§六）：execute 为宿主无关纯入参——(input, ToolContext 受控子集) + deps 注入
+// 测试纪律：execute 为宿主无关纯入参——(input, ToolContext 受控子集) + deps 注入
 // （ensureServer / makeClient / env），plugin 注册形状（ctx.tool.transform）只出现在
 // registerTools 的防御式探测里，留给 P0/P3 真机。
 //
-// 错误呈现（§三-4）：
+// 错误呈现：
 // - 可预期失败（参数校验/防呆/服务端 4xx/发现-创建诊断）→ 结构化错误文本（error: + hint:），
 //   模型可见可继续；
 // - 意意外异常 → 直接抛出（宿主转 Tool.Error）；
@@ -19,25 +19,25 @@ import { validateCreateInput } from "../../shared/src/validate.ts";
 import { ensureServer, type EnsureServerDeps } from "./server.ts";
 import type { EnsureServerResult } from "./types.ts";
 
-/** 工具输出（官方形状保守子集，§一-6：{ content: string }——P0 真机校准） */
+/** 工具输出（官方形状保守子集） */
 export interface ToolOutput {
   content: string;
 }
 
 /** execute context 的受控子集（宿主形状 P0-③/⑤ 校准，防御式窄化——缺省即降级，绝不炸） */
 export interface ToolContext {
-  /** 宿主权威的当前 session id（§三-1 默认化锚点；缺席时 monitor 要求显式 session_id） */
+  /** 宿主权威的当前 session id */
   sessionID?: string;
-  /** Session 停止信号——穿透到 fetch（§四纪律 5） */
+  /** Session 停止信号——穿透到 fetch */
   signal?: AbortSignal;
-  /** 宿主工作区根（§四纪律 4 工作区校验锚点；缺席跳过校验，服务端仍有绝对路径校验兜底） */
+  /** 宿主工作区根 */
   directory?: string;
 }
 
 export interface ToolSpec {
   name: string;
   description: string;
-  /** JSON Schema（enum/minimum/maximum 让模型自校验，§一-3） */
+  /** JSON Schema（enum/minimum/maximum 让模型自校验） */
   input: Record<string, unknown>;
   execute(input: unknown, ctx: ToolContext): Promise<ToolOutput>;
 }
@@ -45,7 +45,7 @@ export interface ToolSpec {
 export interface ToolDeps extends EnsureServerDeps {
   /** 发现-创建注入（默认真实 ensureServer；测试注入固定产物——server.test.ts 已覆盖其六分支） */
   ensureServer?: (deps: EnsureServerDeps) => Promise<EnsureServerResult>;
-  /** client 工厂（测试注入；默认按 service.json 现值新建——绝不缓存，§四纪律 1） */
+  /** client 工厂（测试注入；默认按 service.json 现值新建——绝不缓存） */
   makeClient?: (svc: ServiceFile, signal: AbortSignal | undefined) => MonitorClient;
   /** 诊断日志（默认无操作；index.ts 接 DEBUG 日志） */
   log?: (msg: string) => void;
@@ -62,7 +62,7 @@ function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null;
 }
 
-/** 每次工具调用的统一开场（§四纪律 1/2）：现读发现-创建 → 新建 client。
+/** 每次工具调用的统一开场：现读发现-创建 → 新建 client。
  *  ensureServer 的诊断 Error 与服务端 API 错误都转结构化文本；其余异常放行上抛。 */
 async function connect(
   deps: ToolDeps,
@@ -83,7 +83,7 @@ async function connect(
   return { client, ensured };
 }
 
-/** 工具主体执行的统一错误围栏：已知可预期错误 → 结构化文本；未知异常上抛（§三-4） */
+/** 工具主体执行的统一错误围栏：已知可预期错误 → 结构化文本；未知异常上抛 */
 async function guarded(body: () => Promise<ToolOutput>): Promise<ToolOutput> {
   try {
     return await body();
@@ -104,7 +104,7 @@ async function guarded(body: () => Promise<ToolOutput>): Promise<ToolOutput> {
 }
 
 // ---------------------------------------------------------------------------
-// monitor_server（§二：health + 按需 spawn；模型选实例的数据源）
+// monitor_server（health + 按需 spawn；模型选实例的数据源）
 
 function formatInstances(h: HealthInfo): string {
   const rows = h.opencode_instances.map(
@@ -139,7 +139,7 @@ export function monitorServerTool(deps: ToolDeps): ToolSpec {
 }
 
 // ---------------------------------------------------------------------------
-// monitor（§二：任务下达；§三-1 session_id/opencode_port 默认化 + 显式优先）
+// monitor（任务下达）
 
 /** 默认 opencode 实例端口：现读默认共享服务的 service.json（绝不缓存） */
 function defaultOpencodePort(deps: ToolDeps): number | null {
@@ -152,7 +152,7 @@ function defaultOpencodePort(deps: ToolDeps): number | null {
   }
 }
 
-/** 工作区校验（§四纪律 4——唯一插件端校验，防呆语义非安全边界）：
+/** 工作区校验：
  *  input.directory 显式传入时，realpath 必须落在宿主工作区内；锚点缺席（宿主未提供
  *  location）跳过，服务端的绝对路径 + 存在性校验兜底。 */
 function directoryWithinWorkspace(inputDir: string, workspaceRoot: string | undefined): string | null {
@@ -230,7 +230,7 @@ export function monitorTool(deps: ToolDeps): ToolSpec {
     },
     async execute(raw, ctx) {
       if (!isRecord(raw)) return fail("monitor input must be a JSON object");
-      // 默认化（§三-1）：宿主权威优先缺省、显式传值优先——消除模型手抄 session id 的幻觉错误
+      // 默认化：宿主权威优先缺省、显式传值优先——消除模型手抄 session id 的幻觉错误
       const sessionId =
         typeof raw["session_id"] === "string" && raw["session_id"] !== ""
           ? raw["session_id"]
@@ -249,7 +249,7 @@ export function monitorTool(deps: ToolDeps): ToolSpec {
         );
       }
 
-      // 插件端防呆（§四纪律 4）：shared 校验器与服务端同规则，快速失败友好错误
+      // 插件端防呆：shared 校验器与服务端同规则，快速失败友好错误
       const v = validateCreateInput({ ...raw, session_id: sessionId, opencode_port: port });
       if (!v.ok) {
         return fail(
@@ -274,7 +274,7 @@ export function monitorTool(deps: ToolDeps): ToolSpec {
 }
 
 // ---------------------------------------------------------------------------
-// monitor_manage（§二：任务管理全生命周期；§三-2 补 delete）
+// monitor_manage（任务管理全生命周期）
 
 const ACTIONS = ["list", "status", "stop", "keepalive", "update", "read_log", "delete"] as const;
 type ManageAction = (typeof ACTIONS)[number];
@@ -379,19 +379,19 @@ export function monitorManageTool(deps: ToolDeps): ToolSpec {
 // ---------------------------------------------------------------------------
 // 注册接线（宿主形状唯一出现处——防御式探测，P0 真机校准）
 
-/** editor.add 的保守形状（§一-3；宿主类型经此本地描述） */
+/** editor.add 的保守形状 */
 export interface ToolEditor {
   add(spec: { name: string; description: string; input: Record<string, unknown>; execute: (input: unknown, ctx: unknown) => Promise<ToolOutput> }): unknown;
 }
 
-/** transform 返回的注册句柄（§一-3：reg.dispose() 撤销注册） */
+/** transform 返回的注册句柄（reg.dispose() 撤销注册） */
 export interface ToolRegistration {
   dispose(): void;
 }
 
 /**
  * 向宿主注册三工具。ctx.tool.transform 缺席（宿主无该路径——P0 未验证形状）时返回 null
- * 并留痕跳过：注册失败的最坏结果是"无工具"，绝不拖垮宿主（§1.3-5 豁免区边界）。
+ * 并留痕跳过：注册失败的最坏结果是"无工具"，绝不拖垮宿主。
  *
  * execute 的宿主 ctx 防御式窄化为 ToolContext：sessionID / signal 直取；
  * 工作区锚点双源探测（executeCtx.location.directory ?? setupCtx.location.directory）。

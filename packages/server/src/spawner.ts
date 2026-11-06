@@ -1,15 +1,15 @@
-// 任务进程管理（PLAN §2.3 / §6.1；SERVER-PLAN 阶段 C——M2 前置）
-// 职责 = 进程管理三件套（v1 实证资产，原样继承）+ spawn + 击杀：
+// 任务进程管理
+// 职责 = 进程管理三件套+ spawn + 击杀：
 //   1. (pid, /proc/<pid>/stat starttime) 双因子身份——pid 复用防御
 //   2. kill(pid, 0) 探活 + /proc state 字母纠错（Z 僵尸按死，防 PID 1 不收割环境误判）
 //   3. EXIT-trap wrapper 记录退出码（仅 SIGKILL 无法穿透 → 无文件 → 上层判 "unknown"）
 //   + spawnTask：bash -c wrapper、detached 自成进程组、stdio 落任务日志 fd、父侧放手
-//   + killTree：SIGTERM 进程组 → killGraceMs → SIGKILL（PLAN §2.2）
+//   + killTree：SIGTERM 进程组 → killGraceMs → SIGKILL
 // 不做：日志消费（tail）、状态机（monitor）、持久化（taskstore）。
 //
 // /proc 解析纪律：comm 字段可含空格与括号，一律从最后一个 ')' 之后取字段
-// （SERVER-PLAN §一 spawner 要点）。锁内简化版 lockIsPidAlive 在 main.ts，二者同源
-// （阶段 B 锁注记：任务进程的双因子版在此）。
+// 。锁内简化版 lockIsPidAlive 在 main.ts，二者同源
+// 。
 
 import { spawn } from "node:child_process";
 import { closeSync, openSync, readFileSync } from "node:fs";
@@ -72,14 +72,14 @@ export function exitCodeFromRaw(raw: string | null): string {
 }
 
 // ---------------------------------------------------------------------------
-// 三件套之三：EXIT-trap wrapper 与 detached spawn（PLAN §2.3 文件即管道）
+// 三件套之三：EXIT-trap wrapper 与 detached spawn
 
 /** wrapper 脚本：EXIT trap 按 128+signo 约定归一为 signal:N 后写 exit 文件；
  *  文件路径经 env（OMT_EXIT_FILE）传递——零引号注入面。命令原样作为脚本体。
  *  信号 trap 必要性（实测）：bash 自身死于 pending SIGTERM 时 laststatus 丢失为 0，
  *  组 TERM 会被误记 "exit 0"——显式转 exit 128+N 保证"被信号杀"在 exit 文件可区分。
  *  chmod 600（真机权限审计暴露）：printf > 创建跟随服务端 umask（644）——exit 文件
- *  属 0600 契约（PLAN §4 任务目录私有），显式收紧。 */
+ *  属 0600 契约，显式收紧。 */
 export function wrapperScript(command: string): string {
   return [
     `trap 'rc=$?; if [ "$rc" -ge 128 ]; then printf "signal:%s\\n" "$((rc-128))" >"$OMT_EXIT_FILE"; else printf "%s\\n" "$rc" >"$OMT_EXIT_FILE"; fi; chmod 600 "$OMT_EXIT_FILE"' EXIT`,
@@ -105,7 +105,7 @@ export interface SpawnOptions {
 }
 
 export function spawnTask(paths: TaskFilePaths, command: string, opts: SpawnOptions): SpawnedTask {
-  const logFd = openSync(paths.log, "a", 0o600); // append：reattach 续写同一管道（G 阶段续读）
+  const logFd = openSync(paths.log, "a", 0o600); // append：reattach 续写同一管道
   try {
     const child = spawn("bash", ["-c", wrapperScript(command)], {
       cwd: opts.cwd,
@@ -126,7 +126,7 @@ export function spawnTask(paths: TaskFilePaths, command: string, opts: SpawnOpti
 }
 
 // ---------------------------------------------------------------------------
-// killTree：TERM → killGraceMs → KILL（PLAN §2.2 stop 语义）
+// killTree：TERM → killGraceMs → KILL
 
 function signalGroup(pgid: number, sig: NodeJS.Signals | 0): "ok" | "gone" {
   try {

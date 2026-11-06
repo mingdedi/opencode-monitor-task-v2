@@ -1,5 +1,5 @@
-// 阶段 E 真机验收（SERVER-PLAN）：管线全套（M3）
-//  ① 风暴合并：30 行 ERROR → 1 条通知（SERVER-PLAN 验收判据原文）
+// 真机验收：管线全套
+//  ① 风暴合并：30 行 ERROR → 1 条通知
 //     ——合并批含 [30 lines coalesced] 头、前 10 行预览、(… 20 more lines suppressed)；
 //     lifecycle 保序在后，注明 30 matched / 1 sent
 //  ② pattern 过滤：ERROR/OK 混合输出 + pattern=^ERROR → 通知仅含 ERROR 行，
@@ -153,7 +153,7 @@ async function scenario1_storm(client: MonitorClient): Promise<void> {
     });
     const final = await waitForTerminal(client, t.id);
     check("①风暴: 任务终态 completed", final?.state === "completed", `state=${final?.state}`);
-    // events_sent 送达回调计数：终态可见 ≠ 投递完成（同 ③④ 裁定，轮询至稳定值）
+    // events_sent 送达回调计数：终态可见 ≠ 投递完成（轮询至稳定值）
     const settled = await awaitTaskField(client, t.id, (t2) => t2.events_sent === 1 && t2.events_dropped === 0);
     check("①风暴: events_sent=1（30 行合 1 条）", settled?.events_sent === 1, `sent=${settled?.events_sent}`);
     check("①风暴: events_dropped=0", settled?.events_dropped === 0, `dropped=${settled?.events_dropped}`);

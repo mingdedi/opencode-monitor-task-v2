@@ -1,4 +1,4 @@
-// 阶段 G 真机验收（SERVER-PLAN）：恢复与加固（M5）
+// 真机验收：恢复与加固
 //  ① 优雅 kill：SIGTERM 服务端 → 任务进程存活照跑（log 持续增长）→ 重启 reattach
 //     认领 → health.reattach.claimed=1 → 缺席摘要恰 1 条送达真实 session（绝不逐行重放）
 //     → last_offset 续读（缺席行不重算）
@@ -9,10 +9,10 @@
 //     （P1 根治：认领失败可见，不哑跑）+ 进程不被误杀
 //  ⑤ /api/shutdown：无 kill_tasks → 服务端退、任务存活；kill_tasks=true → killed=2、
 //     进程组全灭、服务端退
-//  ⑥ 权限审计（PLAN §4）：state/data 根与任务目录 0700；meta.json/log/exit 600；
+//  ⑥ 权限审计：state/data 根与任务目录 0700；meta.json/log/exit 600；
 //     server.log 不含命令全文
 // 隔离：服务端 state/data 走 /tmp/opencode/omt-verify-m5-<pid>；probe session 用后即删；
-//       投递成功判据 = synthetic 200 + 信封实际到达会话（message API，E 阶段观察口径）。
+//       投递成功判据 = synthetic 200 + 信封实际到达会话（message API，）。
 //
 // 前置：opencode 共享服务运行中（~/.local/state/opencode/service.json 存在且 /api/info 200）
 // 用法: node --import tsx scripts/verify-m5.ts
@@ -449,7 +449,7 @@ async function scenario6_audit(): Promise<void> {
   }
   check("⑥审计: 任务目录 0700", dirOk, entries.join(","));
   check("⑥审计: meta/log/exit/pending 600", fileOk);
-  // server.log 不含命令全文（PLAN §4——命令只落任务 meta，不进服务端日志）
+  // server.log 不含命令全文
   const logText = existsSync(SERVER_LOG) ? readFileSync(SERVER_LOG, "utf8") : "";
   check("⑥审计: server.log 无命令全文", !logText.includes("while read i") && !logText.includes("sleep 120"), `log ${logText.length}B`);
   check("⑥审计: server.log 含 reattach 认领留痕（显式化）", logText.includes("reattach:"), "no reattach trace");

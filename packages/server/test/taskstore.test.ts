@@ -1,4 +1,4 @@
-// taskstore 单测：原子写/私有目录/TaskMeta roundtrip/布局守卫（SERVER-PLAN 阶段 B）
+// taskstore 单测：原子写/私有目录/TaskMeta roundtrip/布局守卫
 import assert from "node:assert/strict";
 import { mkdtempSync, readdirSync, rmSync, statSync, writeFileSync, mkdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -106,7 +106,7 @@ test("initTaskDir: 目录 0700；writeMeta/readMeta 全字段 roundtrip", () => 
   assert.equal(statSync(taskFilePaths(env, "mon_t1").meta).mode & 0o777, 0o600);
 });
 
-test("readMeta: 不存在返回 null；坏 JSON 抛错（供 G 阶段保守路径区分）", () => {
+test("readMeta: 不存在返回 null；坏 JSON 抛错（供保守路径区分）", () => {
   assert.equal(readMeta(env, "mon_nope"), null);
   initTaskDir(env, "mon_bad");
   writeFileSync(taskFilePaths(env, "mon_bad").meta, "{ broken");
@@ -128,7 +128,7 @@ test("listTaskIds: 只列合法任务目录并排序；tasks/ 不存在时空", 
 });
 
 // ---------------------------------------------------------------------------
-// 阶段 G：pending 读写 + StoredTaskView
+// pending 读写 + StoredTaskView
 
 test("pending：append FIFO 上限丢最旧并返回计数；空数组写删文件", async () => {
   const { appendPending, readPending, writePending, initTaskDir, taskFilePaths } = await import("../src/taskstore.ts");

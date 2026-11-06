@@ -1,4 +1,4 @@
-// 契约测试：spec 快照逐字段对照 §1.2.1 synthetic 端点契约（M0，PLAN §1.3-4）
+// 契约测试：spec 快照逐字段对照 synthetic 端点契约
 // 快照由 scripts/fetch-spec.ts 抓取；若 opencode 版本升级，重抓后此测试即守门人
 
 import assert from "node:assert/strict";

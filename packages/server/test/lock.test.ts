@@ -1,4 +1,4 @@
-// 单实例锁单测：O_EXCL 抢占/死锁抢占/坏锁/真进程探活（SERVER-PLAN 阶段 B 验收 ②③ 的原语层）
+// 单实例锁单测：O_EXCL 抢占/死锁抢占/坏锁/真进程探活
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";

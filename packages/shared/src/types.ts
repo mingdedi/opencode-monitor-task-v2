@@ -1,44 +1,44 @@
-// v1 实证参数原样继承（PLAN §5.1），单点定义，双端共享
+// 参数与上限单点定义，双端共享
 export const LIMITS = {
-  /** 每 session_id 存活任务上限（PLAN §2.4） */
+  /** 每 session_id 存活任务上限 */
   sessionMaxAliveTasks: 16,
-  /** registry 内存终态上限，驱逐最旧（PLAN §2.10） */
+  /** registry 内存终态上限，驱逐最旧 */
   registryMaxTerminal: 200,
-  /** TaskStore 终态目录 TTL（PLAN §2.10） */
+  /** TaskStore 终态目录 TTL */
   taskTtlMs: 3_600_000,
-  /** 单行通知截断长度（PLAN §2.5） */
+  /** 单行通知截断长度 */
   lineMaxChars: 2000,
-  /** coalesce 窗口内携带的最大行数（PLAN §2.5） */
+  /** coalesce 窗口内携带的最大行数 */
   coalesceMaxLines: 10,
-  /** coalesce 窗口内单行预览长度（PLAN §2.5） */
+  /** coalesce 窗口内单行预览长度 */
   coalesceLineChars: 200,
-  /** coalesce pending 行上限，防内存膨胀（PLAN §2.5） */
+  /** coalesce pending 行上限，防内存膨胀 */
   coalescePendingMax: 1000,
-  /** 令牌桶突发容量（PLAN §2.5） */
+  /** 令牌桶突发容量 */
   tokenBucketBurst: 5,
-  /** 令牌桶每秒补充速率（PLAN §2.5） */
+  /** 令牌桶每秒补充速率 */
   tokenBucketRatePerSec: 1,
-  /** tail 轮询间隔（PLAN §2.5，不用 fs.watch） */
+  /** tail 轮询间隔 */
   tailIntervalMs: 250,
-  /** 无换行软换行阈值（PLAN §2.5） */
+  /** 无换行软换行阈值 */
   softWrapBytes: 65_536,
-  /** 摘要尾部预览行数（PLAN §2.9-3；收集前置于 pattern 过滤，§2.5 末 v1 bug 根治） */
+  /** 摘要尾部预览行数 */
   previewLines: 5,
-  /** 合并窗口默认值，0 关闭（PLAN §3.3） */
+  /** 合并窗口默认值，0 关闭 */
   defaultCoalesceMs: 500,
-  /** 通知上限默认值（PLAN §3.3） */
+  /** 通知上限默认值 */
   defaultMaxEvents: 50,
-  /** 静默裁决窗口默认值（PLAN §3.3） */
+  /** 静默裁决窗口默认值 */
   defaultIdleTimeoutMs: 300_000,
-  /** sweeper 周期（PLAN §2.10） */
+  /** sweeper 周期 */
   sweepIntervalMs: 600_000,
-  /** pending 通知重投周期（SERVER-PLAN §三-2） */
+  /** pending 通知重投周期 */
   pendingRetryMs: 60_000,
   /** 单任务 pending 落盘条目上限，防磁盘膨胀（丢最旧计 dropped） */
   pendingMaxEntries: 100,
-  /** stop 时 TERM→KILL 宽限（PLAN §2.2） */
+  /** stop 时 TERM→KILL 宽限 */
   killGraceMs: 200,
-  /** description 最大长度（PLAN §3.3） */
+  /** description 最大长度 */
   descriptionMaxChars: 80,
   /** coalesce_ms 上界（含） */
   maxCoalesceMs: 60_000,
@@ -46,7 +46,7 @@ export const LIMITS = {
   maxMaxEvents: 10_000,
   /** idle_timeout_ms 上界（含） */
   maxIdleTimeoutMs: 3_600_000,
-  /** GET /api/tasks/:id/log 默认携带行数（PLAN §2.2） */
+  /** GET /api/tasks/:id/log 默认携带行数 */
   logTailDefaultLines: 20,
   /** log tail= 上界（防滥用；单次响应体积上限量级） */
   logTailMaxLines: 1000,
@@ -60,7 +60,7 @@ export const LIMITS = {
 export type WakeMode = "all" | "pattern";
 export type Delivery = "queue" | "steer";
 
-/** 任务状态机（PLAN §2.4 + parked/orphaned，discriminated 于服务端内部实现） */
+/** 任务状态机 */
 export type TaskState =
   | "starting"
   | "running"
@@ -68,8 +68,8 @@ export type TaskState =
   | "completed" // exit 0
   | "failed" // 非零或信号
   | "stopped" // 人为 / 超限 / 裁决到期
-  | "orphaned" // 通知目的地 session 死亡（SERVER-PLAN §三-1：SIGTERM 温和停止）
-  | "parked"; // reattach 认领失败，等待认领（PLAN §2.9-5）
+  | "orphaned" // 通知目的地 session 死亡
+  | "parked"; // reattach 认领失败，等待认领
 
 export interface ExitInfo {
   /** "0" | "1" | ... | "signal:15" | "unknown"（SIGKILL 无法穿透 wrapper） */
@@ -78,7 +78,7 @@ export interface ExitInfo {
   reason: string;
 }
 
-/** 对外任务视图（v1 同款字段 + session_id / opencode_port / state 扩展） */
+/** 对外任务视图（含 session_id / opencode_port / state） */
 export interface PublicInfo {
   id: string;
   description: string | null;
@@ -109,7 +109,7 @@ export interface PublicInfo {
   updated_at: number;
 }
 
-/** POST /api/tasks 请求体（PLAN §3.3 参数表） */
+/** POST /api/tasks 请求体 */
 export interface CreateTaskInput {
   command: string;
   opencode_port: number;
@@ -125,7 +125,7 @@ export interface CreateTaskInput {
   directory?: string;
 }
 
-/** GET /api/health 响应（发现-创建流程判据，PLAN §2.2/§2.9-5） */
+/** GET /api/health 响应 */
 export interface HealthInfo {
   id: string;
   version: string;
@@ -149,7 +149,7 @@ export interface HealthInfo {
   log_bytes: number;
 }
 
-/** 服务端自身 service.json schema（与 opencode service.json 同构，PLAN §2.1） */
+/** 服务端自身 service.json schema */
 export interface ServiceFile {
   id: string;
   version: string;

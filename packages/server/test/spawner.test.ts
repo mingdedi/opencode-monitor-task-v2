@@ -1,5 +1,5 @@
-// spawner 单测（SERVER-PLAN 阶段 C）：wrapper 四态、detached 存活、双因子探活、killTree
-// 真实进程（无 mock）——进程语义必须真机验证（v1 纪律）；任务目录走隔离 XDG
+// spawner 单测：wrapper 四态、detached 存活、双因子探活、killTree
+// 真实进程（无 mock）——进程语义必须真机验证；任务目录走隔离 XDG
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -108,7 +108,7 @@ test("spawn 失败防御：解释器不可用时同步报错且不崩进程（er
 // ---------------------------------------------------------------------------
 // wrapper 四态：exit 0 / exit 7 / 信号 TERM / SIGKILL（无文件 → unknown）
 
-test("wrapper 态①：正常退出 0 → exit 文件 \"0\"，stdout 落 log；权限 0600（G 阶段权限审计）", async () => {
+test("wrapper 态①：正常退出 0 → exit 文件 \"0\"，stdout 落 log；权限 0600", async () => {
   const task = newTask("echo hello-stage-c; exit 0");
   // chmod 600 与 printf 同在 EXIT trap 内但分两步——内容就绪 ≠ 权限就绪（node 20 实测
   // 稳定暴露此窗口），权限断言并入轮询判据消除竞态

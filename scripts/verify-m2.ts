@@ -1,12 +1,12 @@
-// 阶段 D 真机验收（SERVER-PLAN）：最小闭环（M2）
+// 真机验收：最小闭环
 //  ① 服务端起（隔离 XDG + --opencode-state 真实路径）→ health 就绪
 //  ② fail fast 四路：幻觉端口 400 / 死 session 404 / 坏命令 400 / 坏目录 400
 //  ③ 闭环 happy：echo + sleep 任务 → synthetic 注入真实 session → inbox 收到
 //     wake 信封 + lifecycle 信封（保序/信封完整/description 标注）→ completed
 //  ④ failed 终态：exit 3 → failed + lifecycle 信封
-//  ⑤ orphaned：session 死亡 → 温和停止进程组 + 停止通知（§三-1）
+//  ⑤ orphaned：session 死亡 → 温和停止进程组 + 停止通知
 //  ⑥ health 计数：tasks_alive 归零、tasks_total 正确
-// 验收判据（SERVER-PLAN）：下达 echo + sleep 任务 → synthetic 注入真实 session →
+// 验收判据：下达 echo + sleep 任务 → synthetic 注入真实 session →
 //                           会话收到信封消息。
 // 隔离：服务端 state 走 /tmp/opencode/omt-verify-m2-<pid>；probe session 用后即删；
 //       凭证只现读、输出脱敏（session id 截断，password 永不出现）。

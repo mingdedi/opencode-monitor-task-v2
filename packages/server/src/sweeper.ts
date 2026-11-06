@@ -1,11 +1,11 @@
-// 终态清理（PLAN §2.10；SERVER-PLAN 阶段 G）——独立定时器（启动必扫 + 每 10min），
-// 与 tail/tick 关注点分离（v1 轮询耦合负债清零，§5.2）。
+// 终态清理——独立定时器（启动必扫 + 每 10min），
+// 与 tail/tick 关注点分离。
 //
-// 清理集合与判据（SERVER-PLAN §三与 PLAN §2.9-6 裁定）：
+// 清理集合与判据：
 //   - meta 终态（completed/failed/stopped/orphaned）：updated_at（终态落盘时刻）
 //     + taskTtlMs 过期 → 清目录 + registry 移除
 //   - 坏 meta + exit 文件佐证：按 exit mtime（≈终态时刻）同 TTL 清
-//   - 坏 meta 且无 exit：保守不删（§2.9-6——防误删活任务；仅留日志计数）
+//   - 坏 meta 且无 exit：保守不删
 //   - parked：不清（异常态记录，人工 DELETE 处置；其进程可能仍活）
 //   - 活态（starting/running/idle）：不清
 // registry 驱逐（内存 200 上限）只动内存——本模块才是目录的真相清理者。
@@ -35,7 +35,7 @@ export function sweepOnce(env: PathEnv, registry: SweepRegistry, log: (msg: stri
     try {
       meta = readMeta(env, id);
     } catch {
-      // 坏 meta：exit 佐证 → exit mtime 同 TTL；无佐证保守不删（§2.9-6）
+      // 坏 meta：exit 佐证 → exit mtime 同 TTL；无佐证保守不删
       const exitRaw = readExitFile(env, id);
       if (exitRaw === null) {
         result.keptUnverifiable++;
@@ -91,6 +91,6 @@ export function startSweeper(env: PathEnv, registry: SweepRegistry, log: (msg: s
       log(`sweeper: sweep error (${String(err).slice(0, 80)})`);
     }
   };
-  run(); // 启动必扫（PLAN §2.10）
+  run(); // 启动必扫
   return setInterval(run, LIMITS.sweepIntervalMs);
 }

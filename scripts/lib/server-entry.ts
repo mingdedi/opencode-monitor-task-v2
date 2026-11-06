@@ -1,4 +1,4 @@
-// verify/sim 脚本共用的服务端形态解析（M8：bundle 形态全套 verify 重跑，PLUGIN-PLAN §三-5/风险 7）。
+// verify/sim 脚本共用的服务端形态解析。
 //
 // 与 packages/plugin/src/runtime.ts 的形态探测同构（dist/server.mjs 存在 → bundle 形态
 // `node <bundle>`；否则源码形态 `node --import tsx <main.ts>`），但脚本自身以 node 启动，
@@ -19,7 +19,7 @@ export interface ServerEntry {
 }
 
 /** dist/server.mjs 存在 → bundle；否则源码 tsx 直跑（开发形态）。
- *  baseArgs 恒带 --debug：服务端日志默认关闭（PLAN §9-2 决策），而 verify-m4/m5/m8
+ *  baseArgs 恒带 --debug：服务端日志默认关闭，而 verify-m4/m5/m8
  *  与 storm-sim 的判据依赖 server.log 留痕（reattach 认领、无命令全文审计）——
  *  脚本侧统一显式开启，一处改动全套脚本生效。 */
 export function resolveServerEntry(

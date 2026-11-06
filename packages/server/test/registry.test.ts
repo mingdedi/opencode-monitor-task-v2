@@ -1,4 +1,4 @@
-// TaskRegistry 簿记单测（SERVER-PLAN 阶段 D 薄版）：add/get/list 过滤/alive 计数
+// TaskRegistry 簿记单测：add/get/list 过滤/alive 计数
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { PublicInfo } from "@omt/shared";
@@ -83,7 +83,7 @@ test("listInfos：按 session 过滤 + started_at 排序；无过滤全量", () 
 });
 
 // ---------------------------------------------------------------------------
-// 阶段 F：session 上限计数 / remove / 终态驱逐
+// session 上限计数 / remove / 终态驱逐
 
 test("aliveCountForSession：只数该 session 的存活态（idle 也算活）", () => {
   const r = new TaskRegistry();
@@ -120,5 +120,5 @@ test("终态驱逐：超 registryMaxTerminal 时 add 触发，驱逐最旧终态
   assert.equal(r.get("mon_t002") !== undefined, true);
   assert.equal(r.get("mon_alive") !== undefined, true, "存活条目不受驱逐影响");
   assert.equal(r.get("mon_t201x") !== undefined, true);
-  // 驱逐只动内存：目录/TaskStore 归 sweeper（G 阶段）——此处仅 registry 语义
+  // 驱逐只动内存：目录/TaskStore 归 sweeper——此处仅 registry 语义
 });

@@ -8,7 +8,7 @@ import {
 } from "../packages/shared/src/validate.ts";
 
 // ---------------------------------------------------------------------------
-// 发现流程版本兼容判定（SERVER-PLAN §三-3：major.minor 相等即复用）
+// 发现流程版本兼容判定
 
 test("versionCompatible: major.minor equal → compatible (patch differs)", () => {
   assert.equal(versionCompatible("0.1.0", "0.1.9"), true);
@@ -25,7 +25,7 @@ test("versionCompatible: malformed running version → incompatible (fail safe)"
 });
 
 // ---------------------------------------------------------------------------
-// 命令校验（v1 规则，PLAN §3.3）
+// 命令校验
 
 test("trailing & is stripped", () => {
   const r = checkCommand("sleep 10 &");
@@ -229,7 +229,7 @@ test("description length capped at 80", () => {
 });
 
 // ---------------------------------------------------------------------------
-// PATCH 校验（阶段 F：仅 max_events 可调）
+// PATCH 校验仅 max_events 可调）
 
 test("validatePatchInput: 合法 max_events 通过", () => {
   assert.deepEqual(validatePatchInput({ max_events: 10 }), { ok: true, violations: [], value: { max_events: 10 } });

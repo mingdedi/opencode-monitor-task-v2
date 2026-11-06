@@ -1,4 +1,4 @@
-// MonitorClient 外部 signal 传播单测（PLUGIN-PLAN §四纪律 5——P2 对 shared 的增量）
+// MonitorClient 外部 signal 传播单测
 // 注入 fetchImpl 捕获 fetch 收到的 signal——无网络无真机
 import assert from "node:assert/strict";
 import { test } from "node:test";

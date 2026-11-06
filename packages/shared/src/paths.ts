@@ -1,4 +1,4 @@
-// 路径解析单点（PLAN §2.1/§2.3）——全部走环境变量，零硬编码路径，env 可注入便于测试
+// 路径解析单点——全部走环境变量，零硬编码路径，env 可注入便于测试
 // state:  $XDG_STATE_HOME/opencode-monitor-task/   （service.json、锁文件、服务端日志）
 // data:   $XDG_DATA_HOME/opencode-monitor-task/    （tasks/<id>/{meta.json,log,exit,pending.json}）
 

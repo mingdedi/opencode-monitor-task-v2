@@ -1,6 +1,6 @@
-// opencode 共享后台服务的 service.json 读取与鉴权（PLAN §1.2 / §2.8.1）
+// opencode 共享后台服务的 service.json 读取与鉴权
 // url/password 每次 opencode service 重启都会变——每次使用前现读，绝不缓存，凭证永不落盘
-// 阶段 C 的 opencode.ts 注册表以此为基础（--opencode-state 多条目场景）
+// 服务端 opencode.ts 的注册表以此为基础（--opencode-state 多条目场景）
 
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";

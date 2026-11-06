@@ -1,4 +1,4 @@
-// reattach 单测（SERVER-PLAN 阶段 G）：模拟"服务端崩溃后残留"——store 目录 + 活/死任务
+// reattach 单测：模拟"服务端崩溃后残留"——store 目录 + 活/死任务
 // 进程，无任何内存 Monitor。手工构造 meta（模拟崩溃前服务端落盘的快照）后走
 // scanAndReclaim / retryPendingTasks 全路径。mock opencode API（无网络）。
 // 每测试独立 XDG 目录：任务残留（终态 TTL 内的目录）不跨测试泄漏。
@@ -230,7 +230,7 @@ test("活认领：缺席行摘要一条（不逐行重放）+ 认领后新行正
   await settle(r, id);
 });
 
-test("idle 冻结：崩溃前 idle 态 → 认领恢复 running、宽限作废、静默从零武装（§2.9-4）", async () => {
+test("idle 冻结：崩溃前 idle 态 → 认领恢复 running、宽限作废、静默从零武装", async () => {
   const r = rig();
   const { id } = await residue(r, "sleep 3", {
     state: "idle",
@@ -283,7 +283,7 @@ test("死收尾：缺席期间自然退出 → 终态 + exit + 一条合并结�
   assert.equal(syntheticCalls(r).length, 1);
 });
 
-test("死收尾残余行：缺席期间的无换行尾行进结局摘要（v1 flushBuffer 资产在 reattach 死路的移植）", async () => {
+test("死收尾残余行：缺席期间的无换行尾行进结局摘要（收尾冲刷在 reattach 死路同样生效）", async () => {
   const r = rig();
   const { id } = await residue(r, 'echo gone-1; printf "half-line-no-nl"');
   const metaBefore = readMeta(r.env, id)!;
@@ -302,7 +302,7 @@ test("死收尾残余行：缺席期间的无换行尾行进结局摘要（v1 fl
   assert.ok(body.includes("half-line-no-nl"), `摘要 preview 应含尾行，got: ${body}`);
 });
 
-test("死路残留组清空（2026-11-05 裁定：任务结束=组必然清空）：崩溃期间脱管的孙进程在 finalizeDeadTask 被击杀", async () => {
+test("死路残留组清空（任务结束=组必然清空）：崩溃期间脱管的孙进程在 finalizeDeadTask 被击杀", async () => {
   const r = rig();
   const { meta } = await residue(r, 'bash -c "sleep 30 & exit 0"; echo gone'); // 双引号内 & 豁免校验
   assert.ok(
@@ -326,7 +326,7 @@ test("死路残留组清空（2026-11-05 裁定：任务结束=组必然清空�
   assert.equal(info.state, "completed", "残留清杀不改变任务结局（exit 0）");
 });
 
-test("parked：log 丢失的活任务 → 认领失败标 parked、列表可见、进程不杀（§2.9-5）", async () => {
+test("parked：log 丢失的活任务 → 认领失败标 parked、列表可见、进程不杀", async () => {
   const r = rig();
   const { id } = await residue(r, "sleep 3");
   rmSync(taskFilePaths(r.env, id).log);
@@ -345,7 +345,7 @@ test("parked：log 丢失的活任务 → 认领失败标 parked、列表可见�
   process.kill(-meta.pgid!, "SIGKILL");
 });
 
-test("坏 meta：保守不删（§2.9-6），failed 计数留痕", async () => {
+test("坏 meta：保守不删，failed 计数留痕", async () => {
   const r = rig();
   const id = "mon_deadbeef01";
   const paths = initTaskDir(r.env, id);

@@ -1,4 +1,4 @@
-// opencode 封装层单测（SERVER-PLAN 阶段 C）：fetch 全注入，无网络无真实 opencode
+// opencode 封装层单测：fetch 全注入，无网络无真实 opencode
 // 覆盖：注册表白名单拒绝、凭证现读（零缓存）、verifyInstance/verifySession、
 //       synthetic payload 逐字段（delivery 显式）与失败分类（CONTRACT.md 实测判据）
 import assert from "node:assert/strict";
@@ -197,7 +197,7 @@ test("resolveTarget：三层全过 → ok 且凭证来自现读条目", async ()
   }
 });
 
-test("凭证现读（§2.8.1 零缓存）：service.json 换 password 后，下一次调用即用新凭证", async () => {
+test("凭证现读：service.json 换 password 后，下一次调用即用新凭证", async () => {
   const p = writeService("http://127.0.0.1:43210", "pw-old");
   const reg = buildRegistry(env, [p]);
   const { calls, fetch } = mockFetch([

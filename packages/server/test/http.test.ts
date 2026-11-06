@@ -1,4 +1,4 @@
-// http 层单测：鉴权/路由/错误形状（SERVER-PLAN 阶段 B，仅 health + 阶段 D 任务端点）
+// http 层单测：鉴权/路由/错误形状
 import assert from "node:assert/strict";
 import { test, before, after } from "node:test";
 import type { AddressInfo } from "node:net";
@@ -67,7 +67,7 @@ test("未知路径 → 404；POST /api/health → 405", async () => {
   assert.equal(res.status, 405);
 });
 
-test("query string 不影响路由（D/F 阶段 ?session_id= 铺路）", async () => {
+test("query string 不影响路由（?session_id= 铺路）", async () => {
   const res = await get("/api/health?x=1", { authorization: auth(PASSWORD) });
   assert.equal(res.status, 200);
 });
@@ -89,7 +89,7 @@ test("health 抛错 → 500 JSON（不裸崩连接）", async () => {
 });
 
 // ---------------------------------------------------------------------------
-// 任务端点（阶段 D）：路由/鉴权/状态映射/body 防护——业务经注入 stub
+// 任务端点：路由/鉴权/状态映射/body 防护——业务经注入 stub
 
 const stubInfo: PublicInfo = {
   id: "mon_stub0001",
@@ -222,7 +222,7 @@ test("GET /api/tasks/:id：命中 200；未知 404 透传；非法 id 形状直�
   });
 });
 
-test("DELETE /api/tasks/:id：终态删除 → 204 无响应体（阶段 F）", async () => {
+test("DELETE /api/tasks/:id：终态删除 → 204 无响应体", async () => {
   await withTaskServer(
     {
       remove: (id) => (id === "mon_stub0001" ? { status: 204, body: null } : { status: 404, body: { error: "nope", code: "TASK_NOT_FOUND" } }),
@@ -303,7 +303,7 @@ test("GET /api/tasks/:id/log：tail 参数透传；裸文本 JSON 响应；405 �
   );
 });
 
-test("未注入 tasks（阶段 B 形态）：任务路由仍 404 NO_ROUTE（向后兼容）", async () => {
+test("未注入 tasks：任务路由仍 404 NO_ROUTE（向后兼容）", async () => {
   const srv = createMonitorHttpServer({ password: PASSWORD, health: () => ({ ...healthStub }) });
   await new Promise<void>((resolve) => srv.listen(0, "127.0.0.1", resolve));
   const res = await fetch(`http://127.0.0.1:${(srv.address() as AddressInfo).port}/api/tasks`, {
@@ -316,7 +316,7 @@ test("未注入 tasks（阶段 B 形态）：任务路由仍 404 NO_ROUTE（向�
 });
 
 // ---------------------------------------------------------------------------
-// POST /api/shutdown（阶段 G）
+// POST /api/shutdown
 
 test("shutdown：空 body 默认不杀任务；kill_tasks 透传；坏参数 400；GET 405", async () => {
   const calls: boolean[] = [];

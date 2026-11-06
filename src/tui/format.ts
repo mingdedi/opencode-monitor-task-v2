@@ -1,15 +1,14 @@
 // 侧边栏面板行模型（纯函数）：把 FeedSnapshot + 当前 session 折算成 42 列宽的
-// 行数组，渲染层零逻辑。视觉语言继承 v1 panel/format.ts 实证资产（图标集/三行
-// 制/折叠），按 v2 契约扩展：TaskState 新增 orphaned/parked（PLAN §2.4）、
-// description 字段优先展示、idle 裁决倒计时（idle_deadline，PLAN §2.7）、终态
-// 5 分钟展示窗（PLAN §3.5——服务端负责回收，TUI 纯展示）、session 视角过滤。
+// 行数组，渲染层零逻辑。视觉语言：图标集/三行制/折叠；按本插件契约扩展：TaskState 新增 orphaned/parked、
+// description 字段优先展示、idle 裁决倒计时、终态
+// 5 分钟展示窗、session 视角过滤。
 import type { PublicInfo, TaskState } from "../../packages/shared/src/types.ts"
 
-/** 宿主侧边栏内容区固定 42 列（v1 实测）。 */
+/** 宿主侧边栏内容区固定 42 列。 */
 export const PANEL_WIDTH = 42
-/** 展示的任务数上限，超出折叠为 "+N more…"（v1 同款）。 */
+/** 展示的任务数上限，超出折叠为 "+N more…"。 */
 export const MAX_SHOWN = 6
-/** 终态展示窗：updated_at 距今超过 5 分钟不再显示（PLAN §3.5）。 */
+/** 终态展示窗：updated_at 距今超过 5 分钟不再显示。 */
 export const TERMINAL_TTL_MS = 300_000
 
 export type Tone = "head" | "live" | "dim" | "warn"
@@ -54,7 +53,7 @@ export function truncate(s: string, n: number): string {
   return s.length > n ? s.slice(0, Math.max(0, n - 1)) + "…" : s
 }
 
-/** 活态集合（idle 是裁决暂停态，进程仍活——v1 语义继承）。 */
+/** 活态集合（idle 是裁决暂停态，进程仍活）。 */
 export function isLive(t: PublicInfo): boolean {
   return t.state === "running" || t.state === "starting" || t.state === "idle"
 }
@@ -66,7 +65,7 @@ function exitLabel(t: PublicInfo): string {
 
 function headOf(t: PublicInfo, now: number): string {
   if (t.state === "idle" && t.idle_deadline !== null) {
-    // 裁决倒计时是行动信号（keepalive/stop，PLAN §2.7），比运行时长更重要。
+    // 裁决倒计时是行动信号，比运行时长更重要。
     return `${stateIcon(t.state)} ${shortId(t.id)} arb ${fmtDuration(t.idle_deadline)}`
   }
   if (isLive(t)) {
@@ -102,7 +101,7 @@ export interface PanelState {
   readonly now: number
 }
 
-/** 完整行模型。空数组 = 什么都不渲染（v1 折叠空态语义）。 */
+/** 完整行模型。空数组 = 什么都不渲染（折叠空态）。 */
 export function renderLines(state: PanelState): Line[] {
   if (state.status.kind !== "online") {
     if (state.status.kind === "unreachable") {
@@ -112,14 +111,14 @@ export function renderLines(state: PanelState): Line[] {
         { text: `  ${truncate(state.status.detail, PANEL_WIDTH - 2)}`, tone: "dim" },
       ]
     }
-    // offline（无 service.json 或 pid 已死）：按需拉起语义（PLAN §2.1/§3.5）
+    // offline（无 service.json 或 pid 已死）：按需拉起语义
     return [
       { text: "MONITORS · server offline", tone: "warn" },
       { text: "  auto-starts on next tool call", tone: "dim" },
     ]
   }
 
-  // session 视角过滤（PLAN §3.5）；无视角 = 折叠空态，不猜默认 session。
+  // session 视角过滤；无视角 = 折叠空态，不猜默认 session。
   if (state.sessionID === null) return []
 
   const mine = state.tasks.filter((t) => t.session_id === state.sessionID)

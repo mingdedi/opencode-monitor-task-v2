@@ -1,16 +1,16 @@
-// 发现-创建流程（PLUGIN-PLAN §四 server.ts；scripts/verify-m1.ts findOrCreate 内联原型的正式提炼）
+// 发现-创建流程
 //
-// 语义照搬 PLAN §2.1 / verify-m1 场景①②③（M1 真机验收过的行为，不重新设计）：
+// 语义与 verify-m1 场景①②③一致（真机验收过的行为，不重新设计）：
 //   读 service.json → health 1s 探测 → 复用（版本兼容）/ 坏文件清理 / stale 清理（pid 死）
 //   / 活而不响应或版本不兼容 → 报错诊断（拒绝双开——服务端自身还有单实例锁兜底）
 //   / spawn → 就绪轮询 5s → 超时报诊断。
-// 发现-创建失败绝不静默（PLUGIN-PLAN §三-4）：报 pid、server.log 路径、service.json 路径。
+// 发现-创建失败绝不静默：报 pid、server.log 路径、service.json 路径。
 //
-// 纪律（§四）：
+// 纪律：
 // - client 绝不缓存：每次调用现读 service.json，url/password 随服务端重启轮转（纪律 1）
 // - spawn 一律 detached + stdio "ignore" + unref（纪律 3）——自成进程组，
 //   opencode 退出/插件热重载不影响服务端
-// - 命令经 resolveRuntime 解析（禁用 process.execPath——宿主是 bun 编译二进制，§三-5）
+// - 命令经 resolveRuntime 解析（禁用 process.execPath——宿主是 bun 编译二进制）
 // - 双开竞态的结构性防御在服务端（main.ts 单实例锁，后到者退出 0）——插件端不重复设防
 
 import { spawn } from "node:child_process";
@@ -31,16 +31,16 @@ const SERVER_VERSION: string = (
   JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string }
 ).version;
 
-/** health 探测超时（发现流程判据，PLAN §2.1-2 语义） */
+/** health 探测超时 */
 const PROBE_TIMEOUT_MS = 1000;
-/** 就绪轮询窗口 / 间隔（§四纪律 3：就绪轮询 5s；verify-m1 同款节奏） */
+/** 就绪轮询窗口 / 间隔（就绪轮询 5s；verify-m1 同款节奏） */
 const READY_TIMEOUT_MS = 5000;
 const POLL_INTERVAL_MS = 200;
 
 /** 服务端运行时锚点：本模块（packages/plugin/src/server.ts）向上三级 = monorepo 根。
  *  不能用 process.cwd()——插件运行于 opencode 宿主进程内，cwd 是宿主启动目录
  *  （真机实测 = 用户 HOME），冷启动（spawn 路径）因此找不到 server 入口。
- *  bundle 发布形态（M8）下插件包内布局同构，锚点随包根走；届时可经入口 shim 显式注入。 */
+ *  bundle 发布形态下插件包内布局同构，锚点随包根走；届时可经入口 shim 显式注入。 */
 const MODULE_ROOT: string = path.resolve(fileURLToPath(new URL("../../..", import.meta.url)));
 
 // ---------------------------------------------------------------------------

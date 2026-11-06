@@ -1,15 +1,15 @@
-// 崩溃恢复 reattach（PLAN §2.9；SERVER-PLAN 阶段 G）——服务端重启后的必经路径。
+// 崩溃恢复 reattach——服务端重启后的必经路径。
 // 流程：扫 tasks/ 全部 meta.json（按 directory 无工作区限制，全部认领）→
 //   (pid, starttime) 双因子判死活：
 //     死 → 读 exit 收尾 → 缺席输出摘要（绝不逐行重放）→ 向所属 session 补发
 //          合并结局通知 → StoredTaskView 进 registry（终态可见）
-//     活 → 认领（idle 冻结裁定：恢复 running、宽限作废、静默从零武装——§2.9-4）
+//     活 → 认领（idle 冻结：恢复 running、宽限作废、静默从零武装）
 //          → Monitor（tail 从 last_offset 续读）→ absorbMissed 吸收缺席增量
 //          → 有缺席行则 emitReconnect 一条摘要（lifecycle 同级：queue/绕桶/不计额）
 //   认领失败（meta 可解析但看护资源故障，如 log 丢失）→ state=parked 落盘 +
 //   StoredTaskView 进列表（P1 根治：等待认领可见，可 DELETE 清理）。
-//   坏 meta：保守不删（§2.9-6；有 exit 佐证交 sweeper 同 TTL 清），仅计数留痕。
-// 结果显式化：claimed/finalized/failed 进服务端日志与 health.reattach（§2.9-5）。
+//   坏 meta：保守不删，仅计数留痕。
+// 结果显式化：claimed/finalized/failed 进服务端日志与 health.reattach。
 //
 // 幂等性：终态 meta 直接跳过（补发发生在落终态之前——若通知已耗尽则落 pending，
 // 重投兜底）；单实例锁保证无并发认领者。
@@ -58,7 +58,7 @@ export async function scanAndReclaim(deps: ReattachDeps): Promise<ReattachResult
     try {
       meta = readMeta(deps.env, id);
     } catch (err) {
-      // 坏 meta：保守不删（§2.9-6）；sweeper 按 exit 佐证同 TTL 处理
+      // 坏 meta：保守不删；sweeper 按 exit 佐证同 TTL 处理
       result.failed++;
       deps.log(`task ${id} reattach: unreadable meta (${String(err).slice(0, 80)}) — left in place`);
       continue;
@@ -89,7 +89,7 @@ export async function scanAndReclaim(deps: ReattachDeps): Promise<ReattachResult
       result.finalized++;
       continue;
     }
-    // 存活：认领。idle 冻结裁定（§2.9-4）——无观察者期间不计时，恢复 running、
+    // 存活：认领。idle 冻结——无观察者期间不计时，恢复 running、
     // 宽限作废、静默计时由 Monitor 构造从零武装；claimed_by 重写（双认领防御簿记）
     meta.state = "running";
     meta.grace_deadline = null;
@@ -124,7 +124,7 @@ export async function scanAndReclaim(deps: ReattachDeps): Promise<ReattachResult
 }
 
 // ---------------------------------------------------------------------------
-// 死任务收尾：缺席摘要 + exit 结局合并为一条通知（省 turn 预算——E 阶段裁定）
+// 死任务收尾：缺席摘要 + exit 结局合并为一条通知（省 turn 预算——）
 
 interface MissedSummary {
   lines: number;
@@ -135,14 +135,14 @@ interface MissedSummary {
 }
 
 /** 读缺席增量（last_offset → 文件尾）并按管线同款语义计数（scanned/matched/preview）。
- *  绝不投递、不逐行重放（§2.9-3）。log 丢失/不可读：返回零摘要（结局仍要送达）。 */
+ *  绝不投递、不逐行重放。log 丢失/不可读：返回零摘要（结局仍要送达）。 */
 function summarizeMissed(env: ReattachDeps["env"], meta: TaskMeta): MissedSummary {
   const paths = taskFilePaths(env, meta.id);
   let tail: LogTail | null = null;
   try {
     tail = new LogTail(paths.log, meta.last_offset);
     const r = tail.poll();
-    // 无换行残余强制成行（v1 flushBuffer 资产在死路的移植，2026-11-05 对照补齐）：
+    // 无换行残余强制成行：
     // 任务死前的最后半行（printf 无 \n / 被杀进程的半行缓冲）同样属于结局摘要。
     // 任务已死、log 静态，flush 后无重读顾虑
     const lines = [...r.lines, ...tail.flushPending()];
@@ -150,7 +150,7 @@ function summarizeMissed(env: ReattachDeps["env"], meta: TaskMeta): MissedSummar
     let matched = 0;
     const preview: string[] = [];
     for (const line of lines) {
-      // preview 收集前置于 pattern 过滤（§2.5 末根治点——死路同款语义）
+      // preview 收集前置于 pattern 过滤
       preview.push(line);
       if (preview.length > LIMITS.previewLines) preview.shift();
       const m = matcher !== null ? matcher.judge(line) : null;
@@ -167,7 +167,7 @@ function summarizeMissed(env: ReattachDeps["env"], meta: TaskMeta): MissedSummar
 
 async function finalizeDeadTask(deps: ReattachDeps, metaInput: TaskMeta): Promise<void> {
   const meta = metaInput;
-  // 残留组清空（2026-11-05 裁定：任务结束=组必然清空，"连带完整 kill"）：崩溃期间
+  // 残留组清空（任务结束=组必然清空，连带击杀）：崩溃期间
   // wrapper 已死但组内可能残留命令自启的后台子进程——重启后无人看护它们（真·无主
   // 进程），且 sweeper 删目录后写 unlinked fd 磁盘滞留。组已空时 killTree 零开销
   if (meta.pgid) {
@@ -298,7 +298,7 @@ function retirePending(deps: ReattachDeps, id: string, idem: string): void {
 }
 
 // ---------------------------------------------------------------------------
-// pending 重投（SERVER-PLAN §三-2：独立 60s 周期，不等 sweeper 的 10min）
+// pending 重投
 // 遍历 store 全部任务（死任务目录同样有 pending——结局通知的兜底也在这里）；
 // 逐条复用原幂等 id 重投（CONTRACT.md：先到的 200 后重放安全，真去重）。
 // 处置分类：ok → 移除；404/invalid（永久失败）→ 丢弃计 dropped 并继续；
@@ -359,7 +359,7 @@ export async function retryPendingTasks(deps: ReattachDeps): Promise<PendingRetr
         continue;
       }
       if (outcome.kind === "invalid") {
-        // 永久拒绝（4xx 契约错误）：重投永无成功可能（§2.8.2 invalid 不重试）——丢弃
+        // 永久拒绝（4xx 契约错误）：重投永无成功可能——丢弃
         // 计 dropped 并继续。Review 修复：旧实现把 invalid 与 exhausted 混同保留并
         // break——队首一条 invalid 将永久阻塞其后的全部条目（每轮单次尝试后即停），
         // pending 队列静默饿死

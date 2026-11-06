@@ -1,6 +1,6 @@
-// 阶段 F 真机验收（SERVER-PLAN）：裁决与管理（M4）
+// 真机验收：裁决与管理
 //  ① idle 两段式全路径：短窗口（2500ms）静默 → idle + 裁决信封（含 keepalive 指引，
-//     queue/不占额）→ 不动作 → 宽限到期自动杀 stopped（v1 reason 文案）+ 进程组消亡
+//     queue/不占额）→ 不动作 → 宽限到期自动杀 stopped+ 进程组消亡
 //  ② keepalive 复活：idle → keepalive → running + grace 清空 + 计时重置（再次转 idle
 //     而非被杀）→ 第二次 idle 后 stop 收场
 //  ③ 输出自愈：静默转 idle 后恢复输出 → running → 自然 completed（宽限不杀）
@@ -9,7 +9,7 @@
 //  ⑥ 管理面：运行中 DELETE → 409；终态 DELETE → 204 + 404；PATCH 运行中生效；
 //     降额即杀（lowered by update）；readLog 尾部
 // 隔离：服务端 state 走 /tmp/opencode/omt-verify-m4-<pid>；probe session 用后即删；
-//       投递成功判据以 synthetic 200 + meta 计数为权威（CONTRACT.md E 阶段裁定），
+//       投递成功判据以 synthetic 200 + meta 计数为权威（CONTRACT.md ），
 //       信封显现只对裁决通知断言一次（每条 synthetic 一个 LLM turn——省 turn 预算）。
 //
 // 前置：opencode 共享服务运行中（~/.local/state/opencode/service.json 存在且 /api/info 200）
@@ -202,7 +202,7 @@ async function scenario1_twoStage(client: MonitorClient): Promise<void> {
     check("①两段式: 终态清空宽限字段", dead?.grace_deadline === null && dead?.idle_deadline === null);
     check("①两段式: 进程组消亡", !(pid && isTaskProcessAlive({ pid, startTime: null })));
     check("①两段式: 裁决通知不占 wake 额度（sent=0）", (await client.getTask(t.id)).events_sent === 0);
-    // lifecycle reason：meta/服务端日志权威（信封受 turn 调度排队影响不作判据——E 阶段裁定）
+    // lifecycle reason：meta/服务端日志权威（信封受 turn 调度排队影响不作判据——）
     const logPath = `${pathEnv.XDG_STATE_HOME}/opencode-monitor-task/server.log`;
     const logText = existsSync(logPath) ? readFileSync(logPath, "utf8") : "";
     check("①两段式: 服务端日志注明 idle timeout 自动杀", logText.includes("idle timeout after 2500ms without output"));
@@ -253,7 +253,7 @@ async function scenario3_selfHeal(client: MonitorClient): Promise<void> {
     check("③自愈: idle --新输出--> running", healed?.state === "running", `state=${healed?.state}`);
     const final = await awaitTask(client, t.id, (x) => x.state === "completed", 8000);
     check("③自愈: 宽限不杀，自然 completed", final?.state === "completed", `state=${final?.state}`);
-    // sent 送达回调计数：终态可见 ≠ 投递完成（E 阶段裁定）——轮询至稳定值
+    // sent 送达回调计数：终态可见 ≠ 投递完成——轮询至稳定值
     const settled = await awaitTask(client, t.id, (x) => x.events_sent === 1, 8000);
     check("③自愈: 恢复行送达（sent=1）", settled?.events_sent === 1, `sent=${settled?.events_sent}`);
   } finally {
@@ -320,7 +320,7 @@ async function scenario5_terminalReject(client: MonitorClient): Promise<void> {
     const patch = await expectApiError(() => client.updateTask(t.id, { max_events: 10 }), 409, "TASK_TERMINAL");
     check("⑤终态拒绝: PATCH → 409 TASK_TERMINAL", patch.ok, patch.got ?? "");
 
-    // stop 幂等：终态 → 200 同快照（v1 already-stopped 语义）
+    // stop 幂等：终态 → 200 同快照
     const stopped = await client.stopTask(t.id);
     check("⑤幂等: 终态 stop → 200 且快照仍 completed", stopped.state === "completed");
 

@@ -1,4 +1,4 @@
-// 抓取运行中 opencode 服务的 /openapi.json 快照入库（M0 契约防护，PLAN §1.3-4）
+// 抓取运行中 opencode 服务的 /openapi.json 快照入库
 // 凭证从环境/标准位置现读，绝不硬编码；写入前做敏感串自检（开源卫生）
 //
 // 用法: node --import tsx scripts/fetch-spec.ts

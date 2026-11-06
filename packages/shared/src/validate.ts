@@ -1,5 +1,5 @@
-// 命令与参数校验（PLAN §3.3 v1 规则全套 + 参数范围）——纯函数
-// 注意：这是防呆不是安全边界——服务端本就以用户权限执行任意 bash，与 agent 的 shell 工具同级（PLAN §4）
+// 命令与参数校验——纯函数
+// 注意：这是防呆不是安全边界——服务端本就以用户权限执行任意 bash，与 agent 的 shell 工具同级
 //
 // 规则：
 //   1. 尾部 `&` 剥离（引号外的单个尾部 &）
@@ -171,7 +171,7 @@ export function checkCommand(raw: string): CommandCheck {
   return { ok: true, command: cmd };
 }
 
-/** 发现流程版本兼容判定：major.minor 相等即复用，patch 视为兼容（SERVER-PLAN §三-3） */
+/** 发现流程版本兼容判定：major.minor 相等即复用，patch 视为兼容 */
 export function versionCompatible(mine: string, running: string): boolean {
   const a = mine.split(".");
   const b = running.split(".");
@@ -201,7 +201,7 @@ export interface ResolvedCreateInput {
   directory?: string;
 }
 
-/** discriminated union（§6.2 纪律）：ok true 时 value 必在 */
+/** discriminated union：ok true 时 value 必在 */
 export type CreateValidation =
   | { ok: true; violations: []; value: ResolvedCreateInput }
   | { ok: false; violations: ParamViolation[] };
@@ -312,14 +312,14 @@ export function validateCreateInput(input: unknown): CreateValidation {
     idle_timeout_ms: (raw["idle_timeout_ms"] as number | undefined) ?? LIMITS.defaultIdleTimeoutMs,
     directory: (raw["directory"] as string | undefined) ?? undefined,
   };
-  // 显式 wake_mode="all" + pattern：只统计不过滤（PLAN §3.3）
+  // 显式 wake_mode="all" + pattern：只统计不过滤
   return { ok: true, violations: [], value };
 }
 
 // ---------------------------------------------------------------------------
-// PATCH /api/tasks/:id 校验（阶段 F；当前仅 max_events 可调，PLAN §2.2/§3.4）
+// PATCH /api/tasks/:id 校验
 
-/** 与 CreateValidation 同款 discriminated union（§6.2 纪律） */
+/** 与 CreateValidation 同款 discriminated union */
 export type PatchValidation =
   | { ok: true; violations: []; value: { max_events: number } }
   | { ok: false; violations: ParamViolation[] };

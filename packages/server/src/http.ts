@@ -1,10 +1,10 @@
-// HTTP 层（PLAN §2.2 / §6.1）：node:http 自建路由/鉴权/JSON，无框架依赖。
-// 阶段 D：+ POST /api/tasks（创建）、GET /api/tasks（列表，?session_id= 过滤）、
-//         GET /api/tasks/:id（详情）——业务经 tasks 注入，本层只做路由/鉴权/JSON/状态映射。
-// 阶段 F：+ PATCH /api/tasks/:id（max_events）、POST :id/stop、POST :id/keepalive、
-//         DELETE /api/tasks/:id（204）、GET :id/log?tail=N。
-// 阶段 G：+ POST /api/shutdown（可选 kill_tasks，默认 false——任务进程照常存活）。
-// 鉴权：Basic auth username 固定 "monitor"（PLAN §2.2），未授权一律 401 JSON。
+// HTTP 层：node:http 自建路由/鉴权/JSON，无框架依赖。
+// 端点：POST /api/tasks（创建）、GET /api/tasks（列表，?session_id= 过滤）、
+//       GET /api/tasks/:id（详情）——业务经 tasks 注入，本层只做路由/鉴权/JSON/状态映射。
+//       PATCH /api/tasks/:id（max_events）、POST :id/stop、POST :id/keepalive、
+//       DELETE /api/tasks/:id（204）、GET :id/log?tail=N、
+//       POST /api/shutdown（可选 kill_tasks，默认 false——任务进程照常存活）。
+// 鉴权：Basic auth username 固定 "monitor"，未授权一律 401 JSON。
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { timingSafeEqual } from "node:crypto";
@@ -32,9 +32,9 @@ export interface MonitorHttpOptions {
   password: string;
   /** health 数据源（main.ts 注入，含 uptime/实例表等运行时状态） */
   health: () => HealthInfo | Promise<HealthInfo>;
-  /** 任务端点（阶段 D 起 main.ts 注入；缺省时任务路由 404——http.test 独立测试用） */
+  /** 任务端点main.ts 注入；缺省时任务路由 404——http.test 独立测试用） */
   tasks?: TasksApi;
-  /** 关停端点（阶段 G）：kill_tasks=true 时先击杀全部活任务进程组再退出。
+  /** 关停端点：kill_tasks=true 时先击杀全部活任务进程组再退出。
    *  返回被杀数；缺省时 /api/shutdown 404（http.test 独立测试用） */
   shutdown?: (killTasks: boolean) => Promise<{ killed: number }>;
 }

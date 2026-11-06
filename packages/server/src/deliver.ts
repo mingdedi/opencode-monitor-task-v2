@@ -1,11 +1,11 @@
-// 投递链（PLAN §2.8 / §6.1；SERVER-PLAN 阶段 D 基础版）
-// DeliverChain：per-task Promise 串行链保序（v1 资产——wake → 尾批 flush → lifecycle
+// 投递链
+// DeliverChain：per-task Promise 串行链保序（——wake → 尾批 flush → lifecycle
 // 严格序）；单 job 失败不阻断后续 job（保序但隔离失败）。
-// deliverNotification：resolveTarget 现读 service.json（§2.8.1 零缓存）→ sendSynthetic
+// deliverNotification：resolveTarget 现读 service.json→ sendSynthetic
 // （delivery 显式传，CONTRACT.md 实测：省略时服务端默认 steer）→ retryable 类失败
 // 指数退避重试 500ms/2s/8s（上限 3 次）→ session-not-found / invalid 不重试即返回
-// （前者上层标 orphaned，PLAN §2.8.2；后者是调用方 bug，契约测试守门）。
-// 阶段 G：重试耗尽 → pending 落盘重投（本版计 drop + 上层日志，§2.8.2 降级链分段）。
+// 。
+// 重试耗尽 → pending 落盘重投（本版计 drop + 上层日志）。
 
 import type { Delivery, PathEnv } from "@omt/shared";
 import { resolveTarget, sendSynthetic, type OcDeps, type OpencodeRegistry } from "./opencode.ts";
@@ -47,7 +47,7 @@ export interface DeliverJob {
   opencodePort: number;
   /** 信封全文（buildEnvelope 产物，转义已在信封层完成） */
   text: string;
-  /** wake：任务参数；lifecycle：恒 "queue"（PLAN §2.7-4） */
+  /** wake：任务参数；lifecycle：恒 "queue" */
   delivery: Delivery;
   /** 幂等 id：重试必须复用同 id（CONTRACT.md 实测真去重） */
   idempotencyId: string;
@@ -72,7 +72,7 @@ export async function deliverNotification(deps: DeliverDeps, job: DeliverJob): P
   const ocDeps = deps.ocDeps ?? {};
   let lastDetail = "no attempt made";
   for (let attempt = 0; ; attempt++) {
-    // 每次投递前现读目标（§2.8.2 注入流程：opencode 重启后 url/password 都会变）
+    // 每次投递前现读目标（opencode 重启后 url/password 都会变）
     const target = await resolveTarget(deps.ocRegistry, job.opencodePort, deps.env, ocDeps);
     if (target.ok) {
       const r = await sendSynthetic(

@@ -1,6 +1,6 @@
-// Monitor 单测（SERVER-PLAN 阶段 D）：真任务进程 + mock opencode API（无网络）。
+// Monitor 单测：真任务进程 + mock opencode API（无网络）。
 // 覆盖：直通闭环（wake→lifecycle 保序/内容/幂等 id）、completed/failed 终态、
-// max_events 达顶停发（lifecycle 不受额）、orphaned 温和停止（§三-1）、
+// max_events 达顶停发（lifecycle 不受额）、orphaned 温和停止、
 // 投递耗尽不阻断生命周期、createTask fail fast 四路（白名单/session/目录/参数）。
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -129,7 +129,7 @@ const textOf = (c: { body: Record<string, unknown> | null }) => String(c.body?.t
 // ---------------------------------------------------------------------------
 // 闭环与终态
 
-test("临终输出不丢（v1 attached flushBuffer 资产继承）：自然退出时无换行尾行强制成行计数", async () => {
+test("临终输出不丢（收尾冲刷）：自然退出时无换行尾行强制成行计数", async () => {
   const r = rig();
   const out = await create(r, validBody({ command: 'printf "tail-no-newline"' })); // 无换行结尾
   assert.equal(out.ok, true);
@@ -138,12 +138,12 @@ test("临终输出不丢（v1 attached flushBuffer 资产继承）：自然退�
   assert.ok(await waitFor(() => info(r, id).state === "completed"), "should complete");
   // 旧行为：残余不成行 → lines_scanned=0、无 wake；新行为：成行进管线（直通命中 → wake 送达）
   const final = info(r, id);
-  assert.equal(final.lines_scanned, 1, "无换行尾行必须成行（v1 flushBuffer 语义）");
+  assert.equal(final.lines_scanned, 1, "无换行尾行必须成行（收尾冲刷语义）");
   const syn = syntheticCalls(r);
   assert.ok(syn.some((c) => textOf(c).includes("tail-no-newline")), "尾行内容必须到达 agent");
 });
 
-test("临终输出不丢（v1 attached 收尾冲刷继承）：stop 路径 TERM trap 遗言在 lifecycle 前送达", async () => {
+test("临终输出不丢（收尾冲刷）：stop 路径 TERM trap 遗言在 lifecycle 前送达", async () => {
   const r = rig();
   const out = await create(r, validBody({
     command: 'trap "echo caught-term" TERM; echo armed; while :; do sleep 0.1; done',
@@ -157,7 +157,7 @@ test("临终输出不丢（v1 attached 收尾冲刷继承）：stop 路径 TERM 
   assert.equal(info(r, id).state, "stopped");
   // 旧行为：杀组后无人再读（timer 已停 + 无 final pump）→ trap 遗言丢失；
   // 新行为：杀后冲刷读走，且经 deliverChain 保序先于 lifecycle。
-  // waitFor 而非立即断言：lifecycle 在投递链上异步送达（F 阶段教训——await
+  // waitFor 而非立即断言：lifecycle 在投递链上异步送达（——await
   // requestStop 返回 ≠ fetch 已发出）。注：TERM 杀 sleep 0.1 时 bash 的作业回声行
   // （"已终止/Terminated"）与遗言同窗合批送达——杀的回声也是真实输出，一并属 agent
   assert.ok(
@@ -183,7 +183,7 @@ test("直通闭环：echo 行 → wake 信封 → 退出 → lifecycle 信封（
   assert.equal(out.info.state, "running");
   assert.equal(out.info.delivery, "queue"); // 默认
   assert.equal(out.info.pid !== null, true);
-  assert.equal(out.info.idle_deadline, null); // F 阶段激活字段
+  assert.equal(out.info.idle_deadline, null); // 
   assert.equal(out.info.grace_deadline, null);
 
   assert.ok(await waitFor(() => info(r, id).state === "completed"), "should complete");
@@ -197,7 +197,7 @@ test("直通闭环：echo 行 → wake 信封 → 退出 → lifecycle 信封（
 
   const syn = syntheticCalls(r);
   assert.equal(syn.length, 2, `expect wake+lifecycle, got ${syn.length}`);
-  // 保序：wake 先于 lifecycle（PLAN §5.1 deliverChain 资产）
+  // 保序：wake 先于 lifecycle
   assert.ok(textOf(syn[0]!).includes("hello-m"), textOf(syn[0]!));
   assert.ok(textOf(syn[1]!).includes("finished: completed"), textOf(syn[1]!));
   // 信封完整 + description 标注 + 转义在信封层完成
@@ -234,10 +234,10 @@ test("failed 终态：exit 7 → failed + exit_info", async () => {
   assert.ok(lc !== undefined && lc.includes("failed"), String(lc));
 });
 
-test("completed 后残留组清空（2026-11-05 裁定：任务结束=组必然清空，killTree 两档）：引号藏 & 的孙进程被击杀，磁盘泄漏面关闭", async () => {
+test("completed 后残留组清空（任务结束=组必然清空，killTree 两档）：引号藏 & 的孙进程被击杀，磁盘泄漏面关闭", async () => {
   const r = rig();
-  // 双引号内的 & 豁免命令校验（v1 M3.6 掩蔽语义）：内层 bash 后台 sleep 30 后立即
-  // exit 0 → wrapper 记 exit 0 正常 completed，但 sleep 30 脱管残留组内（v1 R3-⑤场景）
+  // 双引号内的 & 豁免命令校验（掩蔽语义）：内层 bash 后台 sleep 30 后立即
+  // exit 0 → wrapper 记 exit 0 正常 completed，但 sleep 30 脱管残留组内（脱管场景）
   const out = await create(r, validBody({ command: 'bash -c "sleep 30 & exit 0"; echo done' }));
   assert.equal(out.ok, true);
   if (!out.ok) return;
@@ -261,7 +261,7 @@ test("completed 后残留组清空（2026-11-05 裁定：任务结束=组必然�
 
 test("max_events=1 直通：首条送达即停即杀，lifecycle 不占额仍投递（E 语义升级版）", async () => {
   const r = rig();
-  // D 版语义是"达顶停发不杀"；E 接入即停即杀（PLAN §3.3）后：首条送达 → SIGTERM
+  // D 版语义是"达顶停发不杀"；E 接入即停即杀后：首条送达 → SIGTERM
   // → stopped。coalesce_ms: 0 显式直通（默认 500ms 窗口会把行合批，本测试专测达顶路径）。
   // 命令用纯内建忙循环（无前台外部子进程）：TERM 直接杀 wrapper bash 本体，
   // 无 "Terminated" 作业回声行——保 dropped=0 断言的确定性（杀后冲刷语义会读回声行）
@@ -285,7 +285,7 @@ test("max_events=1 直通：首条送达即停即杀，lifecycle 不占额仍投
   assert.ok(lc.includes("reason: reached max_events=1"), lc);
 });
 
-test("orphaned：session 死亡（404）→ 停止通知 + SIGTERM 温和停止进程组（§三-1）", async () => {
+test("orphaned：session 死亡（404）→ 停止通知 + SIGTERM 温和停止进程组", async () => {
   const r = rig({ syntheticStatus: 404 });
   const out = await create(r, validBody({ command: "echo orphan-m; sleep 30" }));
   assert.equal(out.ok, true);
@@ -325,7 +325,7 @@ test("投递耗尽不阻断生命周期：恒 500 → wake/lifecycle 都落 pend
   assert.ok(await waitFor(() => info(r, out.info.id).state === "completed"));
   const final = info(r, out.info.id);
   assert.equal(final.events_sent, 0);
-  // G 阶段账目口径：dropped = 真正放弃数——耗尽落 pending 在册不算丢（§2.8.2 末段）
+  // ：dropped = 真正放弃数——耗尽落 pending 在册不算丢
   assert.equal(final.events_dropped, 0);
   // 首投 + 3 重试 × 2 条通知 = 8 次 synthetic 尝试
   assert.equal(syntheticCalls(r).length, 8);
@@ -397,7 +397,7 @@ test("多任务并发：两任务各自闭环，registry 计数正确", async ()
 });
 
 // ---------------------------------------------------------------------------
-// 阶段 E：管线全套（pattern / coalesce / 令牌桶 / 即停即杀 / preview 前置 / 转义）
+// 管线全套（pattern / coalesce / 令牌桶 / 即停即杀 / preview 前置 / 转义）
 
 /** 快速产出 N 行无换行等待的输出（printf 单次写出，单 tick 内全部到达） */
 function stormCmd(n: number, prefix = "ERROR"): string {
@@ -424,7 +424,7 @@ test("coalesce 风暴合并：30 行 ERROR → 1 条通知（前 10 行预览 + 
   assert.ok(!wake.includes("ERROR storm line 11\n"), "第 11 行不逐行展示");
   assert.ok(wake.includes("(… 20 more lines suppressed)"), wake);
   assert.ok(wake.includes("ERROR storm line 30") === false, "尾行不单独出现");
-  // 尾批 flush 保序：合并批先于 lifecycle（v1 flushCoalesce 资产）
+  // 尾批 flush 保序：合并批先于 lifecycle
   assert.ok(textOf(syn[1]!).includes("finished: completed"));
   assert.ok(textOf(syn[1]!).includes("30 matched, 0 filtered"), textOf(syn[1]!));
   assert.ok(textOf(syn[1]!).includes("1 sent"));
@@ -450,7 +450,7 @@ test("pattern 过滤：未命中计入 scanned 丢弃，命中行唤醒", async 
   assert.ok(lc.includes("2 matched, 4 filtered"), lc);
 });
 
-test("wake_mode=all + pattern：只统计不过滤（PLAN §3.3）——全部行照常唤醒", async () => {
+test("wake_mode=all + pattern：只统计不过滤——全部行照常唤醒", async () => {
   const r = rig();
   const out = await create(
     r,
@@ -518,7 +518,7 @@ test("max_events 即停即杀：第 N 条送达 → stopped + 进程组 SIGTERM 
   assert.equal(r.registry.aliveCount(), 0);
 });
 
-test("preview 收集前置于 pattern 过滤：未命中行同样进尾部预览（v1 bug 根治回归）", async () => {
+test("preview 收集前置于 pattern 过滤：未命中行同样进尾部预览（回归）", async () => {
   const r = rig();
   const out = await create(
     r,
@@ -529,14 +529,14 @@ test("preview 收集前置于 pattern 过滤：未命中行同样进尾部预览
   assert.ok(await waitFor(() => info(r, out.info.id).state === "completed"));
   const mon = r.registry.get(out.info.id) as Monitor;
   const preview = mon.latestPreview();
-  // v1 bug：preview 在 matcher 之后收集 → pattern 模式下恒空/仅命中行。
-  // v2：前置收集 → 未过滤行流的全貌尾部（G 阶段 reattach 摘要数据源）
+  // 若 preview 在 matcher 之后收集 → pattern 模式下恒空/仅命中行。
+  // v2：前置收集 → 未过滤行流的全貌尾部
   assert.equal(preview.length, 4, `full tail, got ${preview.length}`);
   assert.ok(preview.some((l) => l.startsWith("INFO storm")), preview.join(" | "));
   assert.equal(preview[preview.length - 1], "ERROR tail-hit");
 });
 
-test("信封转义：合并批内出现的信封闭合标签被实体转义（注入防护，PLAN §2.6）", async () => {
+test("信封转义：合并批内出现的信封闭合标签被实体转义", async () => {
   const r = rig();
   const out = await create(
     r,
@@ -578,7 +578,7 @@ test("窗口到期 flush：行到达后进程仍活，窗口到期由 tick 驱�
 });
 
 // ---------------------------------------------------------------------------
-// 阶段 F：idle 两段式裁决 + 管理操作 + session 上限
+// idle 两段式裁决 + 管理操作 + session 上限
 
 test("idle 两段式全路径：静默 → idle + 裁决通知（queue/不占额）→ 宽限到期自动杀", async () => {
   const r = rig();
@@ -604,7 +604,7 @@ test("idle 两段式全路径：静默 → idle + 裁决通知（queue/不占额
   assert.ok(arb.includes("grace period"), arb);
   assert.ok(r.logs.some((l) => l.includes("idle 400ms without output")), r.logs.join(" | "));
 
-  // 第二段：宽限到期自动杀（v1 reason 文案）
+  // 第二段：宽限到期自动杀
   assert.ok(await waitFor(() => info(r, id).state === "stopped"), "auto-killed after grace");
   const final = info(r, id);
   assert.equal(final.exit_info!.code, "signal:15");
@@ -667,7 +667,7 @@ test("keepalive：idle → 复活 running + 宽限清空；终态 → 409 拒绝
   assert.equal(stopped.ok, true);
   assert.equal(stopped.ok && stopped.info.state, "stopped");
 
-  // 终态上 keepalive → 409（阶段 F 验收判据）
+  // 终态上 keepalive → 409
   const rejected = mon.keepalive();
   assert.equal(rejected.ok, false);
   if (rejected.ok) return;
@@ -695,7 +695,7 @@ test("update（PATCH max_events）：运行中调整生效；终态 → 409 拒�
   assert.equal(rej.error.code, "TASK_TERMINAL");
 });
 
-test("update 降额即杀：max_events 降至 ≤ 已送达数 → 立即 stopped（v1 same ceiling rule）", async () => {
+test("update 降额即杀：max_events 降至 ≤ 已送达数 → 立即 stopped", async () => {
   const r = rig();
   // 先送出 2 条 wake，再降额到 1 → events_sent(2) ≥ 1 → 即停
   const out = await create(
@@ -722,7 +722,7 @@ test("update 降额即杀：max_events 降至 ≤ 已送达数 → 立即 stoppe
   assert.ok(await waitFor(() => !isTaskProcessAlive({ pid, startTime: null })), "process group killed");
 });
 
-test("stop 端点：运行中 → 温和停止 stopped；终态幂等 200（v1 already-stopped 语义）", async () => {
+test("stop 端点：运行中 → 温和停止 stopped；终态幂等 200", async () => {
   const r = rig();
   // echo 先行：等首条 wake 送达再 stop——排除"TERM 早于 bash 装载 trap"的启动竞态
   // （该竞态下 exit 记 unknown，属进程管理三件套的已知窄窗口，stop 语义测的是稳态路径）
@@ -757,7 +757,7 @@ test("stop 端点：运行中 → 温和停止 stopped；终态幂等 200（v1 a
 test("idle 计时重置：持续输出不触发裁决（即便输出全部被过滤）", async () => {
   const r = rig();
   // idle_timeout_ms=600，任务每 250ms 输出一行 INFO（pattern 不命中）跑 1.5s：
-  // v1 资产"任何输出重置静默计时（含被节流/被过滤行）"——永不转 idle，自然终态
+  // "任何输出重置静默计时（含被节流/被过滤行）"——永不转 idle，自然终态
   const out = await create(
     r,
     validBody({
@@ -827,7 +827,7 @@ test("readLogTail：默认 20 行/自定义 tail/非法值 400", async () => {
 });
 
 // ---------------------------------------------------------------------------
-// Review 修复回归（阶段 F）：TOCTOU 复检 / 收尾窗口守卫 / readLog 有界读
+// Review 修复回归：TOCTOU 复检 / 收尾窗口守卫 / readLog 有界读
 
 test("session 上限并发竞态（Review 修复回归）：两 create 同过首查 → 复检恰一通过", async () => {
   const r = rig();

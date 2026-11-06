@@ -1,13 +1,13 @@
-// 日志 tail（PLAN §2.5 / §6.1；SERVER-PLAN 阶段 D + 阶段 E 软换行）
-// 关注点分离（PLAN §5.2）：只 tail——持久 fd + readSync 轮询读增量（不用 fs.watch，
-// NFS/容器安全，v1 实证），StringDecoder 处理多字节边界，产出 cleanLine 后的行流；
+// 日志 tail
+// 关注点分离：只 tail——持久 fd + readSync 轮询读增量（不用 fs.watch，
+// NFS/容器安全），StringDecoder 处理多字节边界，产出 cleanLine 后的行流；
 // 不判死活（monitor 职责）、不做投递（deliver 职责）。
 //
-// last_offset 语义裁定（PLAN §2.3 "断点续读点"具体化）：暴露 pendingBytes()，
+// last_offset 语义：暴露 pendingBytes()，
 // 调用方记 last_offset = 已读字节 - 未成行残余字节，即"最后一个换行符后"的行安全
 // 断点——reattach 从该处续读不丢不重、不拼残行。
 //
-// 64KB 软换行（PLAN §2.5 / v1 feedChunk 资产）：永不换行的输出流（进度条类是 \r
+// 64KB 软换行：永不换行的输出流（进度条类是 \r
 // 已成行；此处针对连 \r 都没有的极端流）在未成行残余超过 64KB 时强制成行——
 // 防单行无限膨胀。软换行后 pending 清空、offset 前进（该段已消费）。
 
@@ -29,7 +29,7 @@ export class LogTail {
   private pending = "";
   private readonly buf = Buffer.alloc(64 * 1024);
 
-  /** startOffset：断点续读起点（新任务为 0）；构造时一次性跳读（D 阶段仅 0，G 阶段 reattach 用） */
+  /** startOffset：断点续读起点（新任务为 0）；构造时一次性跳读 */
   constructor(logPath: string, startOffset = 0) {
     this.fd = openSync(logPath, "r");
     let toSkip = startOffset;
@@ -54,7 +54,7 @@ export class LogTail {
     if (bytes === 0) return { lines: [], bytesConsumed: 0 };
     const { lines: rawLines, rest } = splitLines(this.pending, decoded);
     this.pending = rest;
-    // 64KB 无换行软换行：残余超阈值强制成行（v1 资产；cleanLine 再截 2000——
+    // 64KB 无换行软换行：残余超阈值强制成行（；cleanLine 再截 2000——
     // 目的是防膨胀不是保全内容）
     let softWrapped: string | null = null;
     if (Buffer.byteLength(this.pending) > LIMITS.softWrapBytes) {
@@ -79,7 +79,7 @@ export class LogTail {
     return Buffer.byteLength(this.pending);
   }
 
-  /** 强制未成行残余成行（v1 attached flushBuffer 资产，2026-11-05 对照补齐）：
+  /** 强制未成行残余成行：
    *  进程死亡/停止收尾路径调用——无换行的临终输出（printf 无 \n、被杀进程的
    *  半行缓冲）不得丢失。字节已在前次 poll 的 bytesConsumed 计入，此处只成行；
    *  调用后 pendingBytes()=0（last_offset 前进到文件尾）。幂等：空残余返回 []。 */

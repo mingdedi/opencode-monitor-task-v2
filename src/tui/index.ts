@@ -1,16 +1,16 @@
-// TUI 插件入口（双入口插件的 TUI 运行时，PLAN §6.1）。
+// TUI 插件入口。
 //
 // 重要纪律：本模块（以及 src/tui/ 全部文件）顶层禁止 bare-specifier import
-//（@opentui/*、@opencode/*、solid-js）。v1 实测（v2.0.11/v2.2.5）：宿主只对它
+//（@opentui/*、@opencode/*、solid-js）。实测（v2.0.11/v2.2.5）：宿主只对它
 // 实际扫描的入口文件（根 tui.ts）解析 bare @opentui/* 说明符——import 链上的
 // 其他文件一律 "Cannot find package"。v2.2.5 起宿主的 runtime-plugin-support
-// 机制可能改写此行为，但入口 shim 传参路径在两种机制下都成立，故保持 v1 形状：
+// 机制可能改写此行为，但入口 shim 传参路径在两种机制下都成立：
 //
 //   根 tui.ts（THE 入口）→ 顶层 import @opentui/solid/jsx-runtime
 //   └─ defineTuiPlugin(host) → 把 jsx/jsxs 对下传给面板
 //
 // node: 前缀的内置模块不受此限。其余宿主 API 全部防御式探测，失败降级为
-// 日志记录的跳过——面板失效的最坏结果是"无面板"，绝不拖垮 TUI（§1.3-5 豁免区边界）。
+// 日志记录的跳过——面板失效的最坏结果是"无面板"，绝不拖垮 TUI。
 import { createDebugLog } from "./feed.ts"
 import { createPanel } from "./view.ts"
 import type { HostJsx, TuiContext, TuiPluginDefinition } from "./types.ts"
@@ -29,7 +29,7 @@ export function defineTuiPlugin(host?: HostJsx): TuiPluginDefinition {
       const log = createDebugLog()
       try {
         // 探测：TUI 上下文带 storage.memory；server 进程扫描插件时不带——静默退场
-        //（server 侧只认 index.ts 的 "." 导出，但防御无代价，v1 同款）。
+        //（server 侧只认 index.ts 的 "." 导出，但防御无代价）。
         const ctx = context as unknown
         if (
           ctx === null ||
@@ -56,7 +56,7 @@ export function defineTuiPlugin(host?: HostJsx): TuiPluginDefinition {
         const tui = ctx as TuiContext
         const panel = createPanel(tui, { jsx: rt.jsx, jsxs: rt.jsxs })
         // v2.2.5 起槽位自带 { sessionID } input——session 视角过滤的锚点
-        //（PLAN §3.5；取代 v1 的 ui.tabs/ui.router 逆向信号链）。
+        //。
         const off = tui.ui.slot({
           append: "sidebar.content",
           render: (input: unknown) => panel.el(sessionIdOf(input)),

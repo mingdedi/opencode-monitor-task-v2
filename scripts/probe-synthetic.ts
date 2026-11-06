@@ -1,4 +1,4 @@
-// M0：synthetic 端点运行时语义实测（PLAN §7-M0-③）
+// M0：synthetic 端点运行时语义实测
 // 实测项：① delivery 两模式 ② resume:false ③ 幂等 id 重放 ④ 409/400 触发条件
 // 隔离性：创建专用测试 session，不触碰任何真实会话；结束即删
 // 开源卫生：凭证只现读；输出脱敏（session id 截断，password 永不出现）
