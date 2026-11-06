@@ -43,6 +43,19 @@ hot-reloads; tasks run in their own process groups with file-based pipes
 - opencode ≥ 2.2 (shared background service; `--standalone` / remote
   `--server` modes are not supported)
 
+**Field-tested** (Nov 2026) — full end-to-end pass on real machines: daemon
+discovery/auto-start, command-injection validation, directory sandbox, port
+whitelist, pattern filtering, coalescing, `max_events` cap (SIGTERM at cap),
+two-stage idle adjudication, graceful stop,
+`update`/`keepalive`/`read_log`/`delete`, and ordered loss-free delivery of
+all queued notifications. Verified environments:
+
+- **WSL2** — kernel `6.18.54.1-microsoft-standard-WSL2`, systemd enabled
+- **Native Linux (remote Ubuntu servers)** — Ubuntu 26.04.1 LTS, kernel
+  `7.0.0-42-generic`; Ubuntu 22.04.5 LTS, kernel `6.8.0-138-generic`
+
+No environment-specific issues found on any of the above.
+
 ## Installation
 
 The daemon ships as a single self-contained bundle (`dist/server.mjs`, built
