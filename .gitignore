@@ -2,7 +2,4 @@ node_modules/
 dist/
 *.log
 .DS_Store
-
-# 私有计划文档，不入开源仓库
-*PLAN*.md
 .package.json.workspaces.bak

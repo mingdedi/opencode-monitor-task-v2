@@ -63,12 +63,12 @@ jobs:
         with:
           node-version: 22
       - run: npm install
-      # 发布内容守门:pack 产物里不得出现 test/scripts/服务端源码/私有计划文档
+      # 发布内容守门:pack 产物里不得出现 test/scripts/服务端源码
       # （严格模式:只取 "npm notice <size> <path>" 行——prepack 日志行会伪满足宽松 grep）
       - run: |
           npm pack --dry-run 2>&1 | grep -E "^npm notice [0-9]" | awk '{print $NF}' | sort > files.txt
           cat files.txt
-          ! grep -qE '^(test/|scripts/|packages/server/|packages/.*/test/|.*PLAN.*\.md)' files.txt
+          ! grep -qE '^(test/|scripts/|packages/server/|packages/.*/test/)' files.txt
           grep -qx 'dist/server.mjs' files.txt
           grep -qx 'index.ts' files.txt
           grep -qx 'tui.ts' files.txt
