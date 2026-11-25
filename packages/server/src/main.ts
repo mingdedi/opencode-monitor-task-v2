@@ -5,6 +5,7 @@
 //       → 日志落 state 目录（默认关闭；--debug / DEBUG=1 启动时开启，开启后也不记
 //         命令全文；日志是启动时决定的 debug 选项，不做轮转）
 //       → opencode 实例注册表（--opencode-state 多条目；health 实例表实测）
+//       → 凭证等价：注册实例密码默认并列有效（--no-alt-passwords 关闭，仅自身密码）
 //       → 任务注册表 + 任务端点装配（POST /api/tasks + GET 列表/详情；
 //         stop/keepalive/PATCH/DELETE/log + session 上限/registry 驱逐；
 //         reattach 认领 + pending 重投 + sweeper TTL + /api/shutdown +
@@ -44,7 +45,8 @@ import {
   type ServiceFile,
 } from "@omt/shared";
 import { createMonitorHttpServer, type TaskEndpointOutcome } from "./http.ts";
-import { buildRegistry, parseOpencodeStateArgs, probeInstances, type OpencodeRegistry } from "./opencode.ts";
+import { buildRegistry, parseOpencodeStateArgs, probeInstances, readInstancePasswords, type OpencodeRegistry } from "./opencode.ts";
+import UI_HTML from "./ui-html.ts";
 import { createTask, Monitor, type MonitorDeps } from "./monitor.ts";
 import { retryPendingTasks, scanAndReclaim, type ReattachResult } from "./reattach.ts";
 import { startSweeper } from "./sweeper.ts";
@@ -250,6 +252,9 @@ export async function main(
 
   const paths = envFromProcess(env);
   const shutdownAll = argv.includes("--shutdown-all");
+  // 凭证隔离开关：默认"一把密钥"（注册 opencode 实例密码 = API 全权，含执行命令）；
+  // --no-alt-passwords 关闭等价——仅 daemon service.json 自身密码可鉴权
+  const noAltPasswords = argv.includes("--no-alt-passwords");
   const opencodeStatePaths = parseOpencodeStateArgs(argv);
   // 日志开关：启动时一次决定（--debug 参数或 DEBUG=1 env，任一即开），运行中不变。
   // 默认关闭——零写入、server.log 不创建（日志是 debug 选项而非常设设施；
@@ -274,7 +279,7 @@ export async function main(
   ensurePrivateDir(stateDir(paths));
   log(`starting version=${SERVER_VERSION} argv=[${argv.join(" ")}]`);
   if (shutdownAll) log("--shutdown-all: all task process groups will be killed on exit");
-  const knownArgs = new Set(["--shutdown-all", "--debug", "--opencode-state", ...opencodeStatePaths]);
+  const knownArgs = new Set(["--shutdown-all", "--debug", "--no-alt-passwords", "--opencode-state", ...opencodeStatePaths]);
   for (const a of argv) {
     if (!knownArgs.has(a)) log(`note: unrecognized arg '${a}' ignored (future stages may accept it)`);
   }
@@ -532,7 +537,19 @@ export async function main(
     return { killed };
   };
 
-  const server = createMonitorHttpServer({ password, health, tasks: tasksApi, shutdown: shutdownEndpoint });
+  // 看板与 API 同端口同鉴权：ui 单文件内嵌（ui-html.ts 由 scripts/gen-ui.mjs 生成）；
+  // altPasswords 现读注册 opencode 实例密码——浏览器登录复用 `opencode service get password`。
+  // 注意凭证等价的安全语义：任一注册实例密码 = API 全权（含创建任务执行命令，
+  // 不经插件工作区守卫）——--no-alt-passwords 可关闭等价，仅 daemon 自身密码有效
+  if (noAltPasswords) log("alt passwords disabled (--no-alt-passwords): only daemon service.json password authenticates");
+  const server = createMonitorHttpServer({
+    password,
+    altPasswords: noAltPasswords ? undefined : () => readInstancePasswords(ocRegistry, paths),
+    health,
+    tasks: tasksApi,
+    shutdown: shutdownEndpoint,
+    ui: UI_HTML,
+  });
   try {
     await new Promise<void>((resolve, reject) => {
       server.once("error", reject);

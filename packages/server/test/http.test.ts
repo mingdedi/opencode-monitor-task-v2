@@ -1,8 +1,9 @@
 // http 层单测：鉴权/路由/错误形状
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { test, before, after } from "node:test";
 import type { AddressInfo } from "node:net";
-import { createMonitorHttpServer, type TasksApi } from "../src/http.ts";
+import { createMonitorHttpServer, uiSecurityHeaders, type TasksApi } from "../src/http.ts";
 import type { ApiError, HealthInfo, PublicInfo } from "@omt/shared";
 
 const PASSWORD = "test-password-123";
@@ -163,7 +164,7 @@ test("POST /api/tasks：业务拒绝状态透传（400 原样映射）", async (
     async (base) => {
       const res = await fetch(base + "/api/tasks", {
         method: "POST",
-        headers: { authorization: auth(PASSWORD) },
+        headers: { authorization: auth(PASSWORD), "content-type": "application/json" },
         body: JSON.stringify({}),
       });
       assert.equal(res.status, 400);
@@ -176,7 +177,7 @@ test("POST /api/tasks：坏 JSON → 400 INVALID_JSON；空 body 同样 400", as
   await withTaskServer({}, async (base) => {
     const res = await fetch(base + "/api/tasks", {
       method: "POST",
-      headers: { authorization: auth(PASSWORD) },
+      headers: { authorization: auth(PASSWORD), "content-type": "application/json" },
       body: "not-json{",
     });
     assert.equal(res.status, 400);
@@ -193,7 +194,7 @@ test("POST /api/tasks：body 超 256KB → 413", async () => {
   await withTaskServer({}, async (base) => {
     const res = await fetch(base + "/api/tasks", {
       method: "POST",
-      headers: { authorization: auth(PASSWORD) },
+      headers: { authorization: auth(PASSWORD), "content-type": "application/json" },
       body: "x".repeat(300_000),
     });
     assert.equal(res.status, 413);
@@ -264,14 +265,14 @@ test("PATCH /api/tasks/:id：body JSON 解析 + 出参透传；坏 JSON → 400"
   await withTaskServer({}, async (base) => {
     const ok = await fetch(base + "/api/tasks/mon_stub0001", {
       method: "PATCH",
-      headers: { authorization: auth(PASSWORD) },
+      headers: { authorization: auth(PASSWORD), "content-type": "application/json" },
       body: JSON.stringify({ max_events: 10 }),
     });
     assert.equal(ok.status, 200);
     assert.equal(((await ok.json()) as PublicInfo).id, "mon_stub0001");
     const bad = await fetch(base + "/api/tasks/mon_stub0001", {
       method: "PATCH",
-      headers: { authorization: auth(PASSWORD) },
+      headers: { authorization: auth(PASSWORD), "content-type": "application/json" },
       body: "not-json{",
     });
     assert.equal(bad.status, 400);
@@ -374,4 +375,227 @@ test("shutdown 未注入 → 404 NO_ROUTE（向后兼容）", async () => {
   assert.equal(res.status, 404);
   srv.close();
   srv.closeAllConnections();
+});
+
+// ---------------------------------------------------------------------------
+// 看板（GET /）与鉴权扩展：WWW-Authenticate + altPasswords（opencode 密码复用）
+
+test("401 恒带 WWW-Authenticate（浏览器原生登录框触发器）", async () => {
+  const res = await get("/api/health");
+  assert.equal(res.status, 401);
+  assert.match(res.headers.get("www-authenticate") ?? "", /^Basic realm="opencode-monitor-task"$/);
+});
+
+test("altPasswords：任一候选命中即放行；现读轮换即时生效；错误密码仍拒", async () => {
+  let current = "oc-password-v1";
+  const srv = createMonitorHttpServer({
+    password: PASSWORD,
+    altPasswords: () => [current],
+    health: () => ({ ...healthStub }),
+  });
+  await new Promise<void>((resolve) => srv.listen(0, "127.0.0.1", resolve));
+  const b = `http://127.0.0.1:${(srv.address() as AddressInfo).port}`;
+
+  // opencode 密码与 daemon 自身密码并列有效
+  assert.equal((await fetch(b + "/api/health", { headers: { authorization: auth("oc-password-v1") } })).status, 200);
+  assert.equal((await fetch(b + "/api/health", { headers: { authorization: auth(PASSWORD) } })).status, 200);
+  assert.equal((await fetch(b + "/api/health", { headers: { authorization: auth("wrong") } })).status, 401);
+
+  // 现读语义：provider 返回值变化（opencode 重启轮换）后下一请求即生效，旧值失效
+  current = "oc-password-v2";
+  assert.equal((await fetch(b + "/api/health", { headers: { authorization: auth("oc-password-v2") } })).status, 200);
+  assert.equal((await fetch(b + "/api/health", { headers: { authorization: auth("oc-password-v1") } })).status, 401);
+
+  srv.close();
+  srv.closeAllConnections();
+});
+
+const UI_STUB = "<!doctype html><html><head><title>omt-ui</title></head><body>dashboard</body></html>";
+
+test("GET /：ui 注入 → 200 text/html + 安全头；HEAD 无 body；POST 405", async () => {
+  const srv = createMonitorHttpServer({ password: PASSWORD, health: () => ({ ...healthStub }), ui: UI_STUB });
+  await new Promise<void>((resolve) => srv.listen(0, "127.0.0.1", resolve));
+  const b = `http://127.0.0.1:${(srv.address() as AddressInfo).port}`;
+  const h = { authorization: auth(PASSWORD) };
+
+  const res = await fetch(b + "/", { headers: h });
+  assert.equal(res.status, 200);
+  assert.match(res.headers.get("content-type") ?? "", /^text\/html/);
+  assert.equal(await res.text(), UI_STUB);
+  assert.equal(res.headers.get("cache-control"), "no-store");
+  assert.equal(res.headers.get("x-content-type-options"), "nosniff");
+  assert.match(res.headers.get("content-security-policy") ?? "", /default-src 'none'/);
+  assert.match(res.headers.get("content-security-policy") ?? "", /connect-src 'self'/);
+
+  const head = await fetch(b + "/", { method: "HEAD", headers: h });
+  assert.equal(head.status, 200);
+  assert.equal(await head.text(), "");
+
+  const post = await fetch(b + "/", { method: "POST", headers: h });
+  assert.equal(post.status, 405);
+
+  // 看板与 API 同鉴权：无 auth / 错密码 → 401 + WWW-Authenticate
+  const noAuth = await fetch(b + "/");
+  assert.equal(noAuth.status, 401);
+  assert.ok(noAuth.headers.get("www-authenticate"));
+
+  srv.close();
+  srv.closeAllConnections();
+});
+
+test("GET /：altPasswords 对看板同样生效（opencode 密码登录页面）", async () => {
+  const srv = createMonitorHttpServer({
+    password: PASSWORD,
+    altPasswords: () => ["oc-pw"],
+    health: () => ({ ...healthStub }),
+    ui: UI_STUB,
+  });
+  await new Promise<void>((resolve) => srv.listen(0, "127.0.0.1", resolve));
+  const b = `http://127.0.0.1:${(srv.address() as AddressInfo).port}`;
+  assert.equal((await fetch(b + "/", { headers: { authorization: auth("oc-pw") } })).status, 200);
+  srv.close();
+  srv.closeAllConnections();
+});
+
+test("GET /：ui 未注入 → 404 NO_ROUTE（向后兼容）", async () => {
+  const res = await get("/", { authorization: auth(PASSWORD) });
+  assert.equal(res.status, 404);
+  assert.equal(((await res.json()) as ApiError).code, "NO_ROUTE");
+});
+
+// ---------------------------------------------------------------------------
+// CSRF 围栏（安全审查 F1）：Basic auth 凭证 ambient——浏览器缓存后跨站自动携带，
+// 表单可构造合法 JSON body。围栏：POST/PATCH 带 Content-Type 必须 application/json；
+// Sec-Fetch-Site: cross-site 的状态变更方法一律 403。
+
+test("CSRF：POST/PATCH 携带 form 系 Content-Type → 415（含空 body 表单）", async () => {
+  await withTaskServer({}, async (base) => {
+    const h = { authorization: auth(PASSWORD) };
+    // text/plain + 表单可构造的 JSON（name/value 拼接，= 落在字符串值内）
+    const r1 = await fetch(base + "/api/tasks", {
+      method: "POST",
+      headers: { ...h, "content-type": "text/plain" },
+      body: '{"command":"echo csrf","opencode_port":1,"session_id":"ses_x","x":"="}',
+    });
+    assert.equal(r1.status, 415);
+    assert.equal(((await r1.json()) as ApiError).code, "UNSUPPORTED_MEDIA_TYPE");
+    // 空 body 的表单 POST 也带 form 系类型——同样拒（shutdown 空 body 语义不被绕过）
+    const r2 = await fetch(base + "/api/tasks/mon_stub0001/stop", {
+      method: "POST",
+      headers: { ...h, "content-type": "application/x-www-form-urlencoded" },
+    });
+    assert.equal(r2.status, 415);
+    const r3 = await fetch(base + "/api/tasks/mon_stub0001", {
+      method: "PATCH",
+      headers: { ...h, "content-type": "multipart/form-data; boundary=x" },
+      body: "x",
+    });
+    assert.equal(r3.status, 415);
+    // application/json 带参数放行；无 Content-Type 头放行（curl -X POST 兼容）
+    const r4 = await fetch(base + "/api/tasks", {
+      method: "POST",
+      headers: { ...h, "content-type": "application/json; charset=utf-8" },
+      body: JSON.stringify({ command: "echo x", opencode_port: 1, session_id: "ses_stub" }),
+    });
+    assert.equal(r4.status, 201);
+    const r5 = await fetch(base + "/api/tasks/mon_stub0001/stop", { method: "POST", headers: h });
+    assert.equal(r5.status, 200);
+  });
+});
+
+test("CSRF：shutdown 表单系类型拒绝（空 body/构造 body 皆 415），业务零调用", async () => {
+  const calls: boolean[] = [];
+  const srv = createMonitorHttpServer({
+    password: PASSWORD,
+    health: () => ({ ...healthStub }),
+    shutdown: async (killTasks) => {
+      calls.push(killTasks);
+      return { killed: 0 };
+    },
+  });
+  await new Promise<void>((resolve) => srv.listen(0, "127.0.0.1", resolve));
+  const b = `http://127.0.0.1:${(srv.address() as AddressInfo).port}`;
+  const h = { authorization: auth(PASSWORD) };
+  const r1 = await fetch(b + "/api/shutdown", {
+    method: "POST",
+    headers: { ...h, "content-type": "application/x-www-form-urlencoded" },
+  });
+  assert.equal(r1.status, 415);
+  const r2 = await fetch(b + "/api/shutdown", {
+    method: "POST",
+    headers: { ...h, "content-type": "text/plain" },
+    body: '{"kill_tasks":true,"x":"="}',
+  });
+  assert.equal(r2.status, 415);
+  assert.deepEqual(calls, []);
+  srv.close();
+  srv.closeAllConnections();
+});
+
+test("CSRF：Sec-Fetch-Site cross-site 状态变更 → 403；same-origin/无头放行；GET 不受限", async () => {
+  await withTaskServer({}, async (base) => {
+    const h = { authorization: auth(PASSWORD) };
+    const xs = { ...h, "sec-fetch-site": "cross-site", "content-type": "application/json" };
+    assert.equal((await fetch(base + "/api/tasks", { method: "POST", headers: xs, body: "{}" })).status, 403);
+    assert.equal((await fetch(base + "/api/tasks/mon_stub0001", { method: "PATCH", headers: xs, body: "{}" })).status, 403);
+    assert.equal((await fetch(base + "/api/tasks/mon_stub0001", { method: "DELETE", headers: xs })).status, 403);
+    assert.equal((await fetch(base + "/api/tasks/mon_stub0001/stop", { method: "POST", headers: xs })).status, 403);
+    // GET 只读不受限（跨源读本已被 CORS 拦）
+    assert.equal((await fetch(base + "/api/tasks", { headers: xs })).status, 200);
+    // same-origin（看板自身）与无头（非浏览器客户端）放行
+    assert.equal((await fetch(base + "/api/tasks/mon_stub0001/stop", { method: "POST", headers: { ...h, "sec-fetch-site": "same-origin" } })).status, 200);
+    assert.equal((await fetch(base + "/api/tasks/mon_stub0001/stop", { method: "POST", headers: h })).status, 200);
+  });
+});
+
+test("nosniff：JSON 响应（200/401/404/204）恒带 x-content-type-options", async () => {
+  assert.equal((await get("/api/health")).headers.get("x-content-type-options"), "nosniff"); // 401
+  assert.equal((await get("/api/health", { authorization: auth(PASSWORD) })).headers.get("x-content-type-options"), "nosniff");
+  assert.equal((await get("/api/nope", { authorization: auth(PASSWORD) })).headers.get("x-content-type-options"), "nosniff");
+  await withTaskServer({}, async (base) => {
+    const del = await fetch(base + "/api/tasks/mon_stub0001", { method: "DELETE", headers: { authorization: auth(PASSWORD) } });
+    assert.equal(del.headers.get("x-content-type-options"), "nosniff"); // 204
+  });
+});
+
+test("altPasswords 懒读：无 Authorization/daemon 密码命中 → 零调用；Basic 未命中才现读", async () => {
+  let reads = 0;
+  const srv = createMonitorHttpServer({
+    password: PASSWORD,
+    altPasswords: () => {
+      reads++;
+      return ["oc-pw"];
+    },
+    health: () => ({ ...healthStub }),
+  });
+  await new Promise<void>((resolve) => srv.listen(0, "127.0.0.1", resolve));
+  const b = `http://127.0.0.1:${(srv.address() as AddressInfo).port}`;
+  assert.equal((await fetch(b + "/api/health")).status, 401); // 无头
+  assert.equal(reads, 0);
+  assert.equal((await fetch(b + "/api/health", { headers: { authorization: "Bearer xyz" } })).status, 401); // 非 Basic
+  assert.equal(reads, 0);
+  assert.equal((await fetch(b + "/api/health", { headers: { authorization: auth(PASSWORD) } })).status, 200); // daemon 命中短路
+  assert.equal(reads, 0);
+  assert.equal((await fetch(b + "/api/health", { headers: { authorization: auth("wrong") } })).status, 401); // Basic 未命中 → 现读
+  assert.equal(reads, 1);
+  assert.equal((await fetch(b + "/api/health", { headers: { authorization: auth("oc-pw") } })).status, 200); // alt 命中
+  assert.equal(reads, 2);
+  srv.close();
+  srv.closeAllConnections();
+});
+
+test("hash CSP：script-src 为脚本块 sha256（非 unsafe-inline）；无脚本 → 'none'", () => {
+  const script = '\nconsole.log("hi");\n';
+  const ui = `<!doctype html><html><body><script>${script}</script></body></html>`;
+  const h = uiSecurityHeaders(ui);
+  const hash = createHash("sha256").update(script, "utf8").digest("base64");
+  assert.ok(h["content-security-policy"]!.includes(`script-src 'sha256-${hash}'`));
+  assert.ok(!h["content-security-policy"]!.includes("script-src 'unsafe-inline'"));
+  // 其余安全头不变
+  assert.ok(h["content-security-policy"]!.includes("default-src 'none'"));
+  assert.ok(h["content-security-policy"]!.includes("connect-src 'self'"));
+  assert.equal(h["cache-control"], "no-store");
+  assert.equal(h["x-content-type-options"], "nosniff");
+  // 无脚本块 → script-src 'none'
+  assert.ok(uiSecurityHeaders("<!doctype html><html><body>x</body></html>")["content-security-policy"]!.includes("script-src 'none'"));
 });

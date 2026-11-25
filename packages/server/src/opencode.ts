@@ -35,6 +35,22 @@ export function buildRegistry(env: PathEnv, extraPaths: string[] = []): Opencode
   return { servicePaths: [...new Set([opencodeServicePath(env), ...extraPaths])] };
 }
 
+/** 注册表各条目当前密码（HTTP 鉴权 altPasswords 数据源）：逐路径现读 service.json，
+ *  缺失/坏 JSON 条目跳过，去重返回。与投递凭证纪律同源——零缓存：opencode 重启轮换
+ *  密码后下一请求即生效。任一注册实例的密码均可登录看板（"一把密钥"体验）。 */
+export function readInstancePasswords(registry: OpencodeRegistry, env: PathEnv): string[] {
+  const out = new Set<string>();
+  for (const p of registry.servicePaths) {
+    try {
+      const svc = readOpencodeService(env, p);
+      if (typeof svc.password === "string" && svc.password !== "") out.add(svc.password);
+    } catch {
+      // 该路径当前不可用（opencode 未运行/坏文件）：跳过，不阻断其余条目
+    }
+  }
+  return [...out];
+}
+
 /** argv 解析 --opencode-state <service.json 路径>（可多次出现；缺值/下一 token 是 flag 时忽略该选项） */
 export function parseOpencodeStateArgs(argv: readonly string[]): string[] {
   const out: string[] = [];
@@ -110,6 +126,9 @@ export async function probeInstances(
       let port: number;
       try {
         const u = new URL(svc.url);
+        // scheme 白名单：仅 http(s)——javascript: 等能过 URL 解析且 port 归一为 80，
+        // 若进入 health 实例表会成看板 href 注入向量（UI 侧 connectUrl 同样把关）
+        if (u.protocol !== "http:" && u.protocol !== "https:") return null;
         port = u.port === "" ? (u.protocol === "https:" ? 443 : 80) : Number(u.port);
       } catch {
         return null;
@@ -156,6 +175,7 @@ export async function resolveTarget(
     let entryPort: number;
     try {
       const u = new URL(svc.url);
+      if (u.protocol !== "http:" && u.protocol !== "https:") continue; // 与 probeInstances 同纪律
       entryPort = u.port === "" ? (u.protocol === "https:" ? 443 : 80) : Number(u.port);
     } catch {
       continue;

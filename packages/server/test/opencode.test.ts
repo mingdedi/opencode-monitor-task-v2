@@ -14,6 +14,7 @@ import {
   listInbox,
   parseOpencodeStateArgs,
   probeInstances,
+  readInstancePasswords,
   resolveTarget,
   sendSynthetic,
   verifyInstance,
@@ -327,4 +328,50 @@ test("listInbox：返回 data 数组；非 2xx 抛错", async () => {
 
   const bad = mockFetch([{ test: () => true, respond: json(500, {}) }]);
   await assert.rejects(() => listInbox(svc("http://127.0.0.1:1", "pw"), "ses_t1", { fetchImpl: bad.fetch }));
+});
+
+// ---------------------------------------------------------------------------
+// readInstancePasswords（看板鉴权 altPasswords 数据源）
+
+test("readInstancePasswords：多条目现读 + 缺失/坏文件跳过 + 去重 + 轮换即时生效", () => {
+  const p1 = writeService("http://127.0.0.1:4001", "pw-alpha");
+  const p2 = writeService("http://127.0.0.1:4002", "pw-beta");
+  const p3 = writeService("http://127.0.0.1:4003", "pw-alpha"); // 与 p1 同密码 → 去重
+  const missing = path.join(root, "svcs", "no-such-service.json");
+  const broken = path.join(root, "svcs", "broken.json");
+  writeFileSync(broken, "{not-json");
+
+  const registry = { servicePaths: [p1, p2, p3, missing, broken] };
+  assert.deepEqual(readInstancePasswords(registry, env), ["pw-alpha", "pw-beta"]);
+
+  // 现读零缓存：文件内密码轮换后下一次调用即生效（opencode 重启场景）
+  writeFileSync(p1, JSON.stringify({ url: "http://127.0.0.1:4001", pid: 4321, password: "pw-rotated" }));
+  assert.deepEqual(readInstancePasswords(registry, env), ["pw-rotated", "pw-beta"]);
+
+  // 全部不可用 → 空集（不抛错——daemon 自身密码仍兜底）
+  assert.deepEqual(readInstancePasswords({ servicePaths: [missing, broken] }, env), []);
+});
+
+// ---------------------------------------------------------------------------
+// scheme 白名单（安全审查 F3a：javascript: 等能过 URL 解析且 port 归一为 80，
+// 若进入 health 实例表会成看板 href 注入向量——probeInstances/resolveTarget 同拒）
+
+test("probeInstances：非 http(s) scheme 条目出局（javascript:/data: 不进入实例表）", async () => {
+  const js = writeService("javascript:alert(1)", "pw-js");
+  const data = writeService("data:text/html,x", "pw-data");
+  const ftp = writeService("ftp://127.0.0.1:21", "pw-ftp");
+  const ok = writeService("http://127.0.0.1:43210", "pw-http");
+  const reg = { servicePaths: [js, data, ftp, ok] };
+  const { fetch } = mockFetch([{ test: (c) => c.url.endsWith("/api/info"), respond: json(200, { version: "2.2.5" }) }]);
+  const r = await probeInstances(reg, env, { fetchImpl: fetch, isAlive: () => true });
+  assert.deepEqual(r.map((i) => i.url), ["http://127.0.0.1:43210"]);
+});
+
+test("resolveTarget：非 http(s) scheme 条目不命中（即使端口归一值相同）", async () => {
+  const js = writeService("javascript:alert(1)", "pw-js2"); // port 归一为 80
+  const reg = { servicePaths: [js] };
+  const { fetch } = mockFetch([{ test: () => true, respond: json(200, { version: "2.2.5" }) }]);
+  const r = await resolveTarget(reg, 80, env, { fetchImpl: fetch, isAlive: () => true });
+  assert.equal(r.ok, false);
+  if (!r.ok) assert.equal(r.code, "PORT_NOT_IN_REGISTRY");
 });

@@ -1,0 +1,1338 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>monitor-task · dashboard</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='4' fill='%230f1318'/%3E%3Ccircle cx='8' cy='8' r='4' fill='%2342c784'/%3E%3C/svg%3E">
+<style>
+/* ---------------------------------------------------------------------------
+   monitor-task 自托管看板 —— 单文件、零外部资源、深色终端风。
+   与 daemon API 同端口同鉴权（Basic auth，浏览器原生登录框）。
+   状态图标沿用 TUI 面板字形（◐●○✔✘■⊘⚑），双端视觉语言一致。
+   i18n：en/zh 双语字典 + data-i18n 标记；偏好存 cookie（不区分端口，跨 daemon 重启保留）。
+--------------------------------------------------------------------------- */
+:root {
+  --bg: #0a0d10;
+  --bg-soft: #0e1216;
+  --panel: #131920;
+  --panel-2: #1a222c;
+  --border: #243040;
+  --border-soft: #1b2430;
+  --text: #dbe4ec;
+  --muted: #8494a5;
+  --faint: #5c6b7a;
+  --accent: #53b1fd;
+  --green: #42c784;
+  --amber: #e0b34d;
+  --red: #f0616d;
+  --purple: #b58cf0;
+  --orange: #ef9455;
+  --gray: #7d8b99;
+  --mono: ui-monospace, "SF Mono", "Cascadia Code", "JetBrains Mono", "Fira Code", Consolas, monospace;
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body {
+  background: radial-gradient(1100px 520px at 72% -12%, rgba(83,177,253,.07), transparent 60%), var(--bg);
+  color: var(--text);
+  font: 14px/1.5 var(--sans);
+  min-height: 100dvh;
+}
+.mono { font-family: var(--mono); }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+::selection { background: rgba(83,177,253,.28); }
+* { scrollbar-width: thin; scrollbar-color: #2c3947 transparent; }
+*::-webkit-scrollbar { width: 9px; height: 9px; }
+*::-webkit-scrollbar-thumb { background: #2c3947; border-radius: 5px; }
+*::-webkit-scrollbar-track { background: transparent; }
+
+/* --- 顶栏 ---------------------------------------------------------------- */
+header {
+  position: sticky; top: 0; z-index: 20;
+  display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+  padding: 10px 18px;
+  background: rgba(10,13,16,.86); backdrop-filter: blur(8px);
+  border-bottom: 1px solid var(--border-soft);
+}
+.brand { display: flex; align-items: center; gap: 9px; font-weight: 650; letter-spacing: .2px; }
+.brand .glyph { color: var(--green); font-size: 15px; }
+#statusDot { width: 9px; height: 9px; border-radius: 50%; background: var(--gray); flex: none; }
+#statusDot.online { background: var(--green); box-shadow: 0 0 8px rgba(66,199,132,.7); }
+#statusDot.offline { background: var(--red); box-shadow: 0 0 8px rgba(240,97,109,.6); }
+#daemonStats { color: var(--muted); font-size: 12.5px; font-family: var(--mono); }
+#instances { display: flex; gap: 6px; flex-wrap: wrap; }
+.inst-chip {
+  font-family: var(--mono); font-size: 11.5px; color: var(--muted);
+  border: 1px solid var(--border-soft); border-radius: 999px; padding: 2px 9px;
+  background: var(--panel);
+}
+.inst-chip:hover { text-decoration: none; border-color: var(--border); color: var(--text); }
+.inst-chip .ok { color: var(--green); }
+.inst-chip .bad { color: var(--red); }
+.spacer { flex: 1; }
+
+/* --- 按钮 ---------------------------------------------------------------- */
+.btn {
+  appearance: none; border: 1px solid var(--border); border-radius: 8px;
+  background: var(--panel-2); color: var(--text);
+  font: 500 13px var(--sans); padding: 6px 13px; cursor: pointer;
+  transition: background .12s, border-color .12s, transform .06s;
+  display: inline-flex; align-items: center; gap: 6px;
+}
+.btn:hover { background: #212b37; border-color: #314052; }
+.btn:active { transform: translateY(1px); }
+.btn:disabled { opacity: .45; cursor: not-allowed; }
+.btn-primary { background: rgba(83,177,253,.16); border-color: rgba(83,177,253,.45); color: var(--accent); }
+.btn-primary:hover { background: rgba(83,177,253,.26); border-color: rgba(83,177,253,.65); }
+.btn-danger { background: rgba(240,97,109,.12); border-color: rgba(240,97,109,.4); color: var(--red); }
+.btn-danger:hover { background: rgba(240,97,109,.22); border-color: rgba(240,97,109,.6); }
+.btn-danger.armed { background: var(--red); border-color: var(--red); color: #14090b; font-weight: 650; }
+.btn-sm { padding: 3px 9px; font-size: 12px; border-radius: 6px; }
+.icon-btn {
+  appearance: none; border: 1px solid transparent; border-radius: 6px; background: transparent;
+  color: var(--muted); font-size: 13px; line-height: 1; padding: 4px 6px; cursor: pointer;
+  transition: background .12s, color .12s;
+}
+.icon-btn:hover { background: var(--panel-2); color: var(--text); text-decoration: none; }
+.icon-btn.danger:hover { color: var(--red); }
+.icon-btn.armed { background: var(--red); color: #14090b; font-weight: 700; }
+.icon-btn:disabled, .icon-btn.disabled { opacity: .35; cursor: not-allowed; }
+
+/* --- 横幅 ---------------------------------------------------------------- */
+.banner {
+  display: none; align-items: center; gap: 10px;
+  margin: 10px 18px 0; padding: 9px 14px; border-radius: 9px; font-size: 13px;
+}
+.banner.show { display: flex; }
+#authBanner { background: rgba(224,179,77,.1); border: 1px solid rgba(224,179,77,.4); color: var(--amber); }
+#offlineBanner { background: rgba(240,97,109,.08); border: 1px solid rgba(240,97,109,.35); color: var(--red); }
+.banner code { font-family: var(--mono); font-size: 12px; background: rgba(0,0,0,.3); padding: 1px 5px; border-radius: 4px; }
+
+/* --- 工具条 -------------------------------------------------------------- */
+#toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 12px 18px 4px; }
+.chip {
+  appearance: none; cursor: pointer; border-radius: 999px;
+  border: 1px solid var(--border-soft); background: var(--panel);
+  color: var(--muted); font: 500 12px var(--sans); padding: 4px 11px;
+  transition: border-color .12s, color .12s, background .12s;
+}
+.chip:hover { color: var(--text); border-color: var(--border); }
+.chip.active { background: rgba(83,177,253,.14); border-color: rgba(83,177,253,.5); color: var(--accent); }
+.chip .n { font-family: var(--mono); opacity: .75; margin-left: 4px; }
+select, input[type="text"], input[type="number"], input[type="search"], textarea {
+  background: #0c1015; border: 1px solid var(--border); border-radius: 8px;
+  color: var(--text); font: 13px var(--sans); padding: 6px 10px; outline: none;
+  transition: border-color .12s, box-shadow .12s;
+}
+select:focus, input:focus, textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(83,177,253,.15); }
+input.mono, textarea.mono { font-family: var(--mono); font-size: 12.5px; }
+#sessionFilter { max-width: 220px; }
+#search { width: 260px; }
+#toolbar .spacer { flex: 1; }
+
+/* --- 任务卡片 ------------------------------------------------------------ */
+main { padding: 12px 18px 60px; }
+#grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(355px, 1fr)); gap: 12px; }
+.card {
+  --state: var(--gray); --state-bg: rgba(125,139,153,.12);
+  background: linear-gradient(180deg, var(--panel) 0%, var(--bg-soft) 100%);
+  border: 1px solid var(--border-soft); border-left: 3px solid var(--state);
+  border-radius: 10px; padding: 11px 13px; cursor: pointer;
+  transition: border-color .14s, transform .14s, box-shadow .14s;
+}
+.card:hover { border-color: var(--border); transform: translateY(-1px); box-shadow: 0 6px 18px rgba(0,0,0,.35); }
+.card.selected { border-color: rgba(83,177,253,.55); box-shadow: 0 0 0 1px rgba(83,177,253,.3); }
+.card-top { display: flex; align-items: center; gap: 8px; }
+.pill {
+  display: inline-flex; align-items: center; gap: 6px;
+  font: 600 11px var(--sans); letter-spacing: .4px; text-transform: uppercase;
+  color: var(--state); background: var(--state-bg);
+  border-radius: 999px; padding: 2.5px 9px;
+}
+.pill .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--state); flex: none; }
+.st-starting { --state: var(--amber); --state-bg: rgba(224,179,77,.12); }
+.st-running  { --state: var(--green); --state-bg: rgba(66,199,132,.12); }
+.st-idle     { --state: var(--amber); --state-bg: rgba(224,179,77,.12); }
+.st-completed{ --state: var(--accent); --state-bg: rgba(83,177,253,.12); }
+.st-failed   { --state: var(--red); --state-bg: rgba(240,97,109,.12); }
+.st-stopped  { --state: var(--gray); --state-bg: rgba(125,139,153,.12); }
+.st-orphaned { --state: var(--purple); --state-bg: rgba(181,140,240,.12); }
+.st-parked   { --state: var(--orange); --state-bg: rgba(239,148,85,.12); }
+.st-starting .dot, .st-running .dot { animation: pulse 1.6s ease-in-out infinite; }
+.st-idle .dot { background: transparent; box-shadow: inset 0 0 0 1.5px var(--state); }
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
+.tid { color: var(--faint); font-size: 11.5px; }
+.card-actions { margin-left: auto; display: flex; gap: 2px; }
+.subject { margin-top: 8px; font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.command-line { margin-top: 2px; color: var(--muted); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.meta-line { margin-top: 7px; color: var(--faint); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.counters { margin-top: 5px; color: var(--muted); font-size: 11.5px; }
+.counters b { color: var(--text); font-weight: 600; }
+.counters .drop { color: var(--amber); }
+.card-foot { margin-top: 7px; display: flex; align-items: center; gap: 8px; font-size: 11.5px; color: var(--muted); }
+.card-foot .arb { color: var(--amber); font-weight: 600; }
+.exit-tag { font-family: var(--mono); font-size: 11px; color: var(--state); background: var(--state-bg); border-radius: 5px; padding: 1px 7px; }
+
+/* --- 空态 ---------------------------------------------------------------- */
+#empty { display: none; text-align: center; padding: 90px 20px; color: var(--muted); }
+#empty.show { display: block; }
+#empty .big { font-size: 44px; color: var(--faint); }
+#empty p { margin: 10px 0 18px; }
+
+/* --- 详情抽屉 ------------------------------------------------------------ */
+#scrim { position: fixed; inset: 0; background: rgba(4,6,9,.55); z-index: 30; opacity: 0; pointer-events: none; transition: opacity .2s; }
+#scrim.show { opacity: 1; pointer-events: auto; }
+#drawer {
+  position: fixed; top: 0; right: 0; height: 100dvh; width: min(620px, 100vw); z-index: 40;
+  background: var(--bg-soft); border-left: 1px solid var(--border);
+  transform: translateX(103%); transition: transform .22s ease;
+  display: flex; flex-direction: column;
+  box-shadow: -18px 0 44px rgba(0,0,0,.45);
+}
+#drawer.open { transform: translateX(0); }
+.drawer-head { display: flex; align-items: center; gap: 10px; padding: 13px 16px; border-bottom: 1px solid var(--border-soft); }
+.drawer-head .tid { font-size: 12.5px; color: var(--muted); }
+.drawer-body { flex: 1; overflow-y: auto; padding: 14px 16px 24px; }
+#dSubject { font-size: 15px; font-weight: 600; margin-bottom: 10px; word-break: break-word; }
+.action-row { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; }
+.patch-row { display: flex; align-items: center; gap: 8px; margin-bottom: 14px; font-size: 12.5px; color: var(--muted); }
+.patch-row input { width: 110px; }
+dl.details { display: grid; grid-template-columns: 132px 1fr; gap: 5px 12px; margin: 0 0 16px; font-size: 12.5px; }
+dl.details dt { color: var(--faint); }
+dl.details dd { margin: 0; color: var(--text); word-break: break-all; font-family: var(--mono); font-size: 12px; }
+dl.details dd.plain { font-family: var(--sans); }
+.log-head { display: flex; align-items: center; gap: 10px; margin-bottom: 7px; font-size: 12.5px; color: var(--muted); }
+.log-head label { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; }
+#logView {
+  margin: 0; background: #05080b; border: 1px solid var(--border-soft); border-radius: 8px;
+  padding: 11px 13px; font: 12px/1.6 var(--mono); color: #c4d0dc;
+  max-height: 42vh; overflow: auto; white-space: pre-wrap; word-break: break-all;
+}
+#logNote { color: var(--faint); font-size: 12px; margin-top: 6px; }
+
+/* --- 对话框 -------------------------------------------------------------- */
+dialog {
+  border: 1px solid var(--border); border-radius: 13px; background: var(--panel);
+  color: var(--text); padding: 0; width: min(660px, calc(100vw - 32px));
+  box-shadow: 0 24px 70px rgba(0,0,0,.55);
+}
+dialog::backdrop { background: rgba(4,6,9,.66); backdrop-filter: blur(2px); }
+.dlg-head { display: flex; align-items: center; padding: 14px 18px; border-bottom: 1px solid var(--border-soft); font-weight: 650; }
+.dlg-head .icon-btn { margin-left: auto; }
+.dlg-body { padding: 16px 18px; max-height: min(72dvh, 720px); overflow-y: auto; }
+.dlg-foot { display: flex; justify-content: flex-end; gap: 9px; padding: 13px 18px; border-top: 1px solid var(--border-soft); }
+.field { margin-bottom: 13px; }
+.field label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+.field label .req { color: var(--red); }
+.field input[type="text"], .field input[type="number"], .field select, .field textarea { width: 100%; }
+.field textarea { resize: vertical; min-height: 64px; }
+.field .hint { font-size: 11.5px; color: var(--faint); margin-top: 3px; }
+.field-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.field-row3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; }
+#formError {
+  display: none; background: rgba(240,97,109,.09); border: 1px solid rgba(240,97,109,.4);
+  color: var(--red); border-radius: 8px; padding: 9px 12px; font-size: 12.5px; margin-bottom: 13px;
+  word-break: break-word;
+}
+#formError.show { display: block; }
+#formError .mono { font-size: 11.5px; }
+.help-sec { margin-bottom: 15px; font-size: 13px; }
+.help-sec h4 { margin: 0 0 5px; font-size: 12px; text-transform: uppercase; letter-spacing: .6px; color: var(--faint); }
+.help-sec code { font-family: var(--mono); font-size: 12px; background: rgba(0,0,0,.32); padding: 1px 6px; border-radius: 4px; }
+.help-sec p { margin: 4px 0; color: var(--muted); }
+.adv-zone { border-top: 1px solid var(--border-soft); padding-top: 13px; }
+.adv-zone label { display: inline-flex; gap: 6px; align-items: center; font-size: 12.5px; color: var(--muted); margin-right: 10px; cursor: pointer; }
+#settingsDialog { width: min(460px, calc(100vw - 32px)); }
+
+/* --- toast --------------------------------------------------------------- */
+#toasts { position: fixed; right: 16px; bottom: 16px; z-index: 60; display: flex; flex-direction: column; gap: 8px; }
+.toast {
+  background: var(--panel-2); border: 1px solid var(--border); border-left: 3px solid var(--green);
+  border-radius: 9px; padding: 9px 14px; font-size: 13px; max-width: 380px;
+  box-shadow: 0 10px 30px rgba(0,0,0,.45); cursor: pointer;
+  animation: toast-in .18s ease;
+}
+.toast.err { border-left-color: var(--red); }
+.toast.warn { border-left-color: var(--amber); }
+.toast .mono { font-size: 11.5px; color: var(--muted); }
+@keyframes toast-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+
+@media (max-width: 720px) {
+  #grid { grid-template-columns: 1fr; }
+  #search { width: 100%; }
+  .field-row, .field-row3 { grid-template-columns: 1fr; }
+  dl.details { grid-template-columns: 110px 1fr; }
+}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="brand"><span id="statusDot"></span><span class="glyph">◉</span> monitor-task</div>
+  <span id="daemonStats">connecting…</span>
+  <span id="instances"></span>
+  <span class="spacer"></span>
+  <button class="btn btn-sm" id="settingsBtn" title="Settings" data-i18n-title="settings.title">⚙</button>
+  <button class="btn btn-sm" id="helpBtn" title="Help &amp; auth" data-i18n-title="help.btnTitle">?</button>
+  <button class="btn btn-primary" id="newTaskBtn" data-i18n="newTask">+ New task</button>
+</header>
+
+<div class="banner" id="authBanner">
+  <span><span data-i18n="auth.pre">401 — password rejected (opencode password rotated?). Reload to sign in: username</span> <code>monitor</code><span data-i18n="auth.mid">, password</span> <code>opencode service get password</code><span data-i18n="auth.post">.</span></span>
+  <button class="btn btn-sm" id="authReload" data-i18n="auth.reload">Reload</button>
+</div>
+<div class="banner" id="offlineBanner">
+  <span data-i18n="offline">daemon unreachable — retrying every second…</span>
+</div>
+
+<div id="toolbar">
+  <span id="stateChips"></span>
+  <select id="sessionFilter" title="Filter by destination session" data-i18n-title="session.title"><option value="" data-i18n="session.all">all sessions</option></select>
+  <span class="spacer"></span>
+  <input type="search" id="search" placeholder="Search id / description / command…  ( / )" data-i18n-placeholder="search.placeholder">
+</div>
+
+<main>
+  <div id="grid"></div>
+  <div id="empty">
+    <div class="big">◌</div>
+    <p id="emptyText">No tasks yet.</p>
+    <button class="btn btn-primary" id="emptyNewBtn" data-i18n="empty.create">+ Create a monitor task</button>
+  </div>
+</main>
+
+<div id="scrim"></div>
+<aside id="drawer" aria-label="Task detail">
+  <div class="drawer-head">
+    <span class="pill" id="dPill"><span class="dot"></span><span id="dState">—</span></span>
+    <span class="tid mono" id="dId"></span>
+    <span class="spacer"></span>
+    <button class="icon-btn" id="drawerClose" title="Close (Esc)" data-i18n-title="drawer.closeTitle">✕</button>
+  </div>
+  <div class="drawer-body">
+    <div id="dSubject"></div>
+    <div class="action-row">
+      <a class="btn btn-sm" id="dSessionLink" target="_blank" rel="noopener" title="Open destination session in opencode web" data-i18n="drawer.openSession">↗ Open session</a>
+      <button class="btn btn-sm btn-danger" id="dStop">■ Stop</button>
+      <button class="btn btn-sm" id="dKeepalive" title="Reset idle timer (idle → running)" data-i18n="drawer.keepalive" data-i18n-title="drawer.keepaliveTitle">♥ Keepalive</button>
+      <button class="btn btn-sm btn-danger" id="dDelete">🗑 Delete</button>
+    </div>
+    <div class="patch-row">
+      <span>max_events</span>
+      <input type="number" id="dMaxEvents" min="1" max="10000" class="mono">
+      <button class="btn btn-sm" id="dApply" data-i18n="drawer.apply">Apply</button>
+      <span id="dPatchHint"></span>
+    </div>
+    <dl class="details" id="dDetails"></dl>
+    <div class="log-head">
+      <span data-i18n="log.tail">Log tail</span>
+      <select id="logTail" class="mono">
+        <option value="20" data-i18n="log.lines20">20 lines</option>
+        <option value="100" selected data-i18n="log.lines100">100 lines</option>
+        <option value="500" data-i18n="log.lines500">500 lines</option>
+        <option value="1000" data-i18n="log.lines1000">1000 lines</option>
+      </select>
+      <label><input type="checkbox" id="logFollow" checked> <span data-i18n="log.follow">follow</span></label>
+      <button class="btn btn-sm" id="logRefresh" data-i18n="log.refresh">Refresh</button>
+    </div>
+    <pre id="logView"></pre>
+    <div id="logNote"></div>
+  </div>
+</aside>
+
+<dialog id="createDialog">
+  <div class="dlg-head"><span data-i18n="create.title">New monitor task</span> <button class="icon-btn" id="createClose" title="Close" data-i18n-title="settings.closeTitle">✕</button></div>
+  <form id="createForm">
+    <div class="dlg-body">
+      <div id="formError"></div>
+      <div class="field">
+        <label><span data-i18n="create.command">command</span> <span class="req">*</span></label>
+        <textarea name="command" class="mono" required placeholder="npm run build --watch" spellcheck="false"></textarea>
+        <div class="hint" data-i18n="create.commandHint">bash -c; no bare &amp; / $(…) / backticks (same rules as the agent tool)</div>
+      </div>
+      <div class="field">
+        <label data-i18n="create.description">description</label>
+        <input type="text" name="description" maxlength="80" placeholder="Build watch (shown on the card)" data-i18n-placeholder="create.descriptionPlaceholder">
+      </div>
+      <div class="field-row">
+        <div class="field">
+          <label><span data-i18n="create.instance">opencode instance</span> <span class="req">*</span></label>
+          <select name="opencode_port" id="createInstance" required></select>
+          <div class="hint" data-i18n="create.instanceHint">notification destination — registry whitelist</div>
+        </div>
+        <div class="field">
+          <label><span>session_id</span> <span class="req">*</span></label>
+          <input type="text" name="session_id" class="mono" required placeholder="ses_…" spellcheck="false">
+          <div class="hint" data-i18n="create.sessionHint">must be a live session (server verifies)</div>
+        </div>
+      </div>
+      <div class="field">
+        <label>directory</label>
+        <input type="text" name="directory" class="mono" placeholder="/abs/path (default: daemon cwd)" data-i18n-placeholder="create.directoryPlaceholder" spellcheck="false">
+      </div>
+      <div class="field-row">
+        <div class="field">
+          <label data-i18n="create.pattern">pattern (regex)</label>
+          <input type="text" name="pattern" class="mono" placeholder="ERROR|WARN" spellcheck="false">
+        </div>
+        <div class="field">
+          <label>wake_mode</label>
+          <select name="wake_mode">
+            <option value="" data-i18n="create.wakeAuto">auto (pattern if set, else all)</option>
+            <option value="pattern" data-i18n="create.wakePattern">pattern — wake on match only</option>
+            <option value="all" data-i18n="create.wakeAll">all — wake on every line</option>
+          </select>
+        </div>
+      </div>
+      <div class="field-row3">
+        <div class="field">
+          <label>delivery</label>
+          <select name="delivery">
+            <option value="" data-i18n="create.deliveryDefault">queue (default)</option>
+            <option value="queue">queue</option>
+            <option value="steer">steer</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>coalesce_ms</label>
+          <input type="number" name="coalesce_ms" min="0" max="60000" placeholder="500">
+        </div>
+        <div class="field">
+          <label>max_events</label>
+          <input type="number" name="max_events" min="1" max="10000" placeholder="50">
+        </div>
+      </div>
+      <div class="field">
+        <label>idle_timeout_ms</label>
+        <input type="number" name="idle_timeout_ms" min="1" max="3600000" placeholder="300000 (5 min silence → arbitration)" data-i18n-placeholder="create.idlePlaceholder">
+      </div>
+    </div>
+    <div class="dlg-foot">
+      <button type="button" class="btn" id="createCancel" data-i18n="create.cancel">Cancel</button>
+      <button type="submit" class="btn btn-primary" id="createSubmit" data-i18n="create.submit">Create task</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="settingsDialog">
+  <div class="dlg-head"><span data-i18n="settings.title">Settings</span> <button class="icon-btn" id="settingsClose" title="Close" data-i18n-title="settings.closeTitle">✕</button></div>
+  <div class="dlg-body">
+    <div class="field">
+      <label data-i18n="settings.language">Language</label>
+      <select id="langSelect">
+        <option value="en">English</option>
+        <option value="zh">中文</option>
+      </select>
+      <div class="hint" data-i18n="settings.hint">Stored in a cookie on this host (cookies ignore ports) — survives daemon restarts and port changes. Default follows the browser language.</div>
+    </div>
+  </div>
+</dialog>
+
+<dialog id="helpDialog">
+  <div class="dlg-head"><span data-i18n="help.title">monitor-task dashboard</span> <button class="icon-btn" id="helpClose" title="Close" data-i18n-title="settings.closeTitle">✕</button></div>
+  <div class="dlg-body">
+    <div class="help-sec">
+      <h4 data-i18n="help.whatH">What is this</h4>
+      <p data-i18n-html="help.whatP">Self-hosted dashboard of the monitor-task daemon — same port, same auth as its HTTP API. Independent of opencode's UI: works in any browser tab, alongside TUI / web / desktop.</p>
+    </div>
+    <div class="help-sec">
+      <h4 data-i18n="help.authH">Authentication</h4>
+      <p data-i18n-html="help.authP">Username <code>monitor</code>. Password: <code>opencode service get password</code> (any registered opencode instance, read live — rotation picked up automatically), or the daemon's own password from <code>~/.local/state/opencode-monitor-task/service.json</code>.</p>
+    </div>
+    <div class="help-sec">
+      <h4 data-i18n="help.jumpH">Session jump</h4>
+      <p data-i18n-html="help.jumpP">↗ opens the notification destination in opencode web: <code>{instance}/server/{base64(instance)}/session/{session_id}</code>. The instance must be in the daemon registry (chips in the header). Listen addresses 0.0.0.0/[::] are normalized to loopback for the link.</p>
+    </div>
+    <div class="help-sec">
+      <h4 data-i18n="help.notesH">Notes</h4>
+      <p data-i18n-html="help.notesP">Polls every second (paused while the tab is hidden). Stop / Delete are two-click actions. Log tail is only available while the task record is in the registry. Creating a task here is equivalent to calling the API directly — the plugin's workspace guard does not apply; directory must be an absolute path. Parameter names (command, max_events, …) stay in English by design.</p>
+    </div>
+    <div class="help-sec adv-zone">
+      <h4 data-i18n="help.advH">Advanced</h4>
+      <label><input type="checkbox" id="shutdownKill"> <span data-i18n="help.kill">also kill all task process groups</span></label>
+      <button class="btn btn-sm btn-danger" id="shutdownBtn" data-i18n="help.shutdown">Shutdown daemon</button>
+    </div>
+  </div>
+</dialog>
+
+<div id="toasts"></div>
+
+<script>
+"use strict";
+/* ---------------------------------------------------------------------------
+   单文件看板运行时：现有 HTTP API 的纯客户端（零新增端点）。
+   纪律：一切任务侧字符串经 esc() 入 HTML（含 state/数值——meta 可被本地篡改，
+   不信任任何字段形状）；日志经 textContent（被监控输出不可信）；实例/会话链接
+   仅 http(s) scheme（connectUrl 统一把关，javascript: 等一律 null）。
+   事件一律 addEventListener——markup 零 on* 属性（hash CSP 不覆盖内联处理器；
+   test/ui-asset.test.ts 门禁）。
+   i18n：tr() 查字典；静态标记 data-i18n* 由 applyI18n() 扫刷；偏好 cookie 持久化。
+   参数名（command/max_events/session_id…）与 API 错误原文按设计保留英文。
+--------------------------------------------------------------------------- */
+const $ = (id) => document.getElementById(id);
+const POLL_MS = 1000;
+const ARM_WINDOW_MS = 3000;
+
+const STATE_ICON = { starting:"◐", running:"●", idle:"○", completed:"✔", failed:"✘", stopped:"■", orphaned:"⊘", parked:"⚑" };
+const LIVE_STATES = new Set(["starting", "running", "idle"]);
+const TERMINAL_STATES = ["completed", "failed", "stopped", "orphaned", "parked"];
+
+/* --- i18n 字典（每行一键；test/ui-asset.test.ts 门禁：双语 key parity + 使用面全覆盖） --- */
+const EN = {
+  "doc.title": "monitor-task · dashboard",
+  "connecting": "connecting…",
+  "authRequired": "authentication required",
+  "newTask": "+ New task",
+  "help.btnTitle": "Help & auth",
+  "settings.title": "Settings",
+  "settings.language": "Language",
+  "settings.hint": "Stored in a cookie on this host (cookies ignore ports) — survives daemon restarts and port changes. Default follows the browser language.",
+  "settings.closeTitle": "Close",
+  "auth.pre": "401 — password rejected (opencode password rotated?). Reload to sign in: username",
+  "auth.mid": ", password",
+  "auth.post": ".",
+  "auth.reload": "Reload",
+  "offline": "daemon unreachable — retrying every second…",
+  "chip.all": "All",
+  "chip.live": "Live",
+  "state.starting": "starting",
+  "state.running": "running",
+  "state.idle": "idle",
+  "state.completed": "completed",
+  "state.failed": "failed",
+  "state.stopped": "stopped",
+  "state.orphaned": "orphaned",
+  "state.parked": "parked",
+  "state.gone": "gone",
+  "session.all": "all sessions",
+  "session.title": "Filter by destination session",
+  "search.placeholder": "Search id / description / command…  ( / )",
+  "empty.none": "No tasks yet — create one here, or ask your agent to monitor something.",
+  "empty.noMatch": "No tasks match the current filters.",
+  "empty.create": "+ Create a monitor task",
+  "drawer.openSession": "↗ Open session",
+  "drawer.openSessionTitle": "Open destination session in opencode web",
+  "drawer.stop": "■ Stop",
+  "drawer.stopConfirm": "Confirm stop?",
+  "drawer.stopTitle": "Stop task",
+  "drawer.stopConfirmTitle": "Click again to confirm stop",
+  "drawer.keepalive": "♥ Keepalive",
+  "drawer.keepaliveTitle": "Reset idle timer (idle → running)",
+  "drawer.delete": "🗑 Delete",
+  "drawer.deleteConfirm": "Confirm delete?",
+  "drawer.apply": "Apply",
+  "drawer.sent": "sent",
+  "drawer.autoStop": "(auto-stop)",
+  "drawer.gone": "Task record no longer exists (deleted or swept).",
+  "drawer.closeTitle": "Close (Esc)",
+  "log.tail": "Log tail",
+  "log.lines20": "20 lines",
+  "log.lines100": "100 lines",
+  "log.lines500": "500 lines",
+  "log.lines1000": "1000 lines",
+  "log.follow": "follow",
+  "log.refresh": "Refresh",
+  "log.unavailable": "Log unavailable — task record left the registry (terminal tasks keep logs for a limited window).",
+  "log.empty": "(no output yet)",
+  "log.fetchFailed": "log fetch failed: ",
+  "card.autoStop": "auto-stop in",
+  "card.exit": "exit",
+  "card.ago": "{dur} ago",
+  "card.openSessionTitle": "Open destination session in opencode web",
+  "card.noLinkTitle": "opencode port not in registry — no session link",
+  "card.stopTitle": "Stop task",
+  "card.stopConfirmTitle": "Click again to confirm stop",
+  "card.stopArmed": "sure?",
+  "counter.scan": "scan",
+  "counter.hit": "hit",
+  "counter.sent": "sent",
+  "counter.drop": "drop",
+  "stats.up": "up",
+  "stats.alive": "alive",
+  "stats.total": "total",
+  "stats.reattach": "reattach",
+  "stats.reattachClean": "reattach clean",
+  "create.title": "New monitor task",
+  "create.command": "command",
+  "create.commandHint": "bash -c; no bare & / $(…) / backticks (same rules as the agent tool)",
+  "create.description": "description",
+  "create.descriptionPlaceholder": "Build watch (shown on the card)",
+  "create.instance": "opencode instance",
+  "create.instanceHint": "notification destination — registry whitelist",
+  "create.sessionHint": "must be a live session (server verifies)",
+  "create.directoryPlaceholder": "/abs/path (default: daemon cwd)",
+  "create.pattern": "pattern (regex)",
+  "create.wakeAuto": "auto (pattern if set, else all)",
+  "create.wakePattern": "pattern — wake on match only",
+  "create.wakeAll": "all — wake on every line",
+  "create.deliveryDefault": "queue (default)",
+  "create.idlePlaceholder": "300000 (5 min silence → arbitration)",
+  "create.cancel": "Cancel",
+  "create.submit": "Create task",
+  "create.noInstance": "no registered opencode instance",
+  "create.unreachable": "unreachable",
+  "help.title": "monitor-task dashboard",
+  "help.whatH": "What is this",
+  "help.whatP": "Self-hosted dashboard of the monitor-task daemon — same port, same auth as its HTTP API. Independent of opencode's UI: works in any browser tab, alongside TUI / web / desktop.",
+  "help.authH": "Authentication",
+  "help.authP": "Username <code>monitor</code>. Password: <code>opencode service get password</code> (any registered opencode instance, read live — rotation picked up automatically), or the daemon's own password from <code>~/.local/state/opencode-monitor-task/service.json</code>.",
+  "help.jumpH": "Session jump",
+  "help.jumpP": "↗ opens the notification destination in opencode web: <code>{instance}/server/{base64(instance)}/session/{session_id}</code>. The instance must be in the daemon registry (chips in the header). Listen addresses 0.0.0.0/[::] are normalized to loopback for the link.",
+  "help.notesH": "Notes",
+  "help.notesP": "Polls every second (paused while the tab is hidden). Stop / Delete are two-click actions. Log tail is only available while the task record is in the registry. Creating a task here is equivalent to calling the API directly — the plugin's workspace guard does not apply; directory must be an absolute path. Parameter names (command, max_events, …) stay in English by design.",
+  "help.advH": "Advanced",
+  "help.kill": "also kill all task process groups",
+  "help.shutdown": "Shutdown daemon",
+  "help.shutdownConfirm": "Confirm shutdown?",
+  "toast.stopped": "Stopped {id}",
+  "toast.state": "state",
+  "toast.stopFailed": "Stop failed: ",
+  "toast.keepalive": "Keepalive — idle timer reset",
+  "toast.keepaliveFailed": "Keepalive failed: ",
+  "toast.deleted": "Deleted {id}",
+  "toast.deleteFailed": "Delete failed: ",
+  "toast.patchRange": "max_events must be an integer 1–10000",
+  "toast.patched": "max_events → {v}",
+  "toast.patchFailed": "Patch failed: ",
+  "toast.shutdown": "Daemon shutting down (tasks left running)",
+  "toast.shutdownKilled": "Daemon shutting down — killed {n} task(s)",
+  "toast.shutdownFailed": "Shutdown failed: ",
+  "toast.created": "Created {id}",
+};
+const ZH = {
+  "doc.title": "monitor-task · 看板",
+  "connecting": "连接中…",
+  "authRequired": "需要鉴权",
+  "newTask": "+ 新建任务",
+  "help.btnTitle": "帮助与鉴权",
+  "settings.title": "设置",
+  "settings.language": "语言",
+  "settings.hint": "以 cookie 存于本机（cookie 不区分端口）——daemon 重启换端口后仍保留。默认跟随浏览器语言。",
+  "settings.closeTitle": "关闭",
+  "auth.pre": "401 — 密码被拒（opencode 密码轮换了？）。重新加载登录：用户名",
+  "auth.mid": "，密码",
+  "auth.post": "。",
+  "auth.reload": "重新加载",
+  "offline": "daemon 不可达——每秒重试中…",
+  "chip.all": "全部",
+  "chip.live": "活跃",
+  "state.starting": "启动中",
+  "state.running": "运行中",
+  "state.idle": "静默裁决",
+  "state.completed": "已完成",
+  "state.failed": "失败",
+  "state.stopped": "已停止",
+  "state.orphaned": "孤儿",
+  "state.parked": "搁置",
+  "state.gone": "已消失",
+  "session.all": "全部会话",
+  "session.title": "按目的地会话过滤",
+  "search.placeholder": "搜索 id / 描述 / 命令…（/）",
+  "empty.none": "还没有任务——在此创建，或让 agent 监控点什么。",
+  "empty.noMatch": "没有符合当前过滤条件的任务。",
+  "empty.create": "+ 创建监控任务",
+  "drawer.openSession": "↗ 打开会话",
+  "drawer.openSessionTitle": "在 opencode web 中打开目的地会话",
+  "drawer.stop": "■ 停止",
+  "drawer.stopConfirm": "确认停止？",
+  "drawer.stopTitle": "停止任务",
+  "drawer.stopConfirmTitle": "再次点击确认停止",
+  "drawer.keepalive": "♥ 保活",
+  "drawer.keepaliveTitle": "重置静默计时器（idle → running）",
+  "drawer.delete": "🗑 删除",
+  "drawer.deleteConfirm": "确认删除？",
+  "drawer.apply": "应用",
+  "drawer.sent": "已发送",
+  "drawer.autoStop": "（自动停止）",
+  "drawer.gone": "任务记录已不存在（被删除或清理）。",
+  "drawer.closeTitle": "关闭（Esc）",
+  "log.tail": "日志尾部",
+  "log.lines20": "20 行",
+  "log.lines100": "100 行",
+  "log.lines500": "500 行",
+  "log.lines1000": "1000 行",
+  "log.follow": "跟随",
+  "log.refresh": "刷新",
+  "log.unavailable": "日志不可用——任务记录已离开注册表（终态任务的日志仅保留有限时间）。",
+  "log.empty": "（暂无输出）",
+  "log.fetchFailed": "日志读取失败：",
+  "card.autoStop": "自动停止倒计时",
+  "card.exit": "退出",
+  "card.ago": "{dur}前",
+  "card.openSessionTitle": "在 opencode web 中打开目的地会话",
+  "card.noLinkTitle": "opencode 端口不在注册表——无会话链接",
+  "card.stopTitle": "停止任务",
+  "card.stopConfirmTitle": "再次点击确认停止",
+  "card.stopArmed": "确认？",
+  "counter.scan": "扫描",
+  "counter.hit": "命中",
+  "counter.sent": "发送",
+  "counter.drop": "丢弃",
+  "stats.up": "运行",
+  "stats.alive": "活跃",
+  "stats.total": "总计",
+  "stats.reattach": "恢复",
+  "stats.reattachClean": "恢复干净",
+  "create.title": "新建监控任务",
+  "create.command": "命令",
+  "create.commandHint": "bash -c；禁止裸 & / $(…) / 反引号（与 agent 工具同规则）",
+  "create.description": "描述",
+  "create.descriptionPlaceholder": "构建监控（显示在卡片上）",
+  "create.instance": "opencode 实例",
+  "create.instanceHint": "通知目的地——注册表白名单",
+  "create.sessionHint": "须为存活会话（服务端校验）",
+  "create.directoryPlaceholder": "/abs/path（缺省：daemon cwd）",
+  "create.pattern": "pattern（正则）",
+  "create.wakeAuto": "自动（有 pattern 则 pattern，否则 all）",
+  "create.wakePattern": "pattern——仅命中时唤醒",
+  "create.wakeAll": "all——每行都唤醒",
+  "create.deliveryDefault": "queue（默认）",
+  "create.idlePlaceholder": "300000（静默 5 分钟 → 裁决）",
+  "create.cancel": "取消",
+  "create.submit": "创建任务",
+  "create.noInstance": "无已注册的 opencode 实例",
+  "create.unreachable": "不可达",
+  "help.title": "monitor-task 看板",
+  "help.whatH": "这是什么",
+  "help.whatP": "monitor-task daemon 的自托管看板——与其 HTTP API 同端口、同鉴权。不依赖 opencode 的 UI：任意浏览器标签页可用，与 TUI / web / desktop 并存。",
+  "help.authH": "鉴权",
+  "help.authP": "用户名 <code>monitor</code>。密码：<code>opencode service get password</code>（任一已注册 opencode 实例的当前密码，现读——轮换自动生效），或 daemon 自身密码（<code>~/.local/state/opencode-monitor-task/service.json</code>）。",
+  "help.jumpH": "会话跳转",
+  "help.jumpP": "↗ 在 opencode web 中打开通知目的地：<code>{instance}/server/{base64(instance)}/session/{session_id}</code>。实例须在 daemon 注册表内（顶栏 chips）。监听地址 0.0.0.0/[::] 会归一为 loopback。",
+  "help.notesH": "说明",
+  "help.notesP": "每秒轮询（标签页隐藏时暂停）。停止 / 删除为两段式确认。日志尾部仅在任务记录仍在注册表内时可用。在此创建任务等价于直调 API——插件的工作区守卫不适用，directory 须为绝对路径。参数名（command、max_events 等）按设计保留英文。",
+  "help.advH": "高级",
+  "help.kill": "同时击杀全部任务进程组",
+  "help.shutdown": "关闭 daemon",
+  "help.shutdownConfirm": "确认关闭？",
+  "toast.stopped": "已停止 {id}",
+  "toast.state": "状态",
+  "toast.stopFailed": "停止失败：",
+  "toast.keepalive": "保活——静默计时器已重置",
+  "toast.keepaliveFailed": "保活失败：",
+  "toast.deleted": "已删除 {id}",
+  "toast.deleteFailed": "删除失败：",
+  "toast.patchRange": "max_events 须为 1–10000 的整数",
+  "toast.patched": "max_events → {v}",
+  "toast.patchFailed": "调额失败：",
+  "toast.shutdown": "daemon 正在关闭（任务继续运行）",
+  "toast.shutdownKilled": "daemon 正在关闭——已击杀 {n} 个任务",
+  "toast.shutdownFailed": "关闭失败：",
+  "toast.created": "已创建 {id}",
+};
+const I18N = { en: EN, zh: ZH };
+
+const S = {
+  lang: "en",
+  health: null, tasks: [], online: false, authFailed: false,
+  filter: { state: "all", session: "", q: "" },
+  selectedId: null,
+  logTail: 100, logFollow: true, logUnavailable: false,
+  armed: new Map(), // "id:action" → expiry epoch ms（两段式确认；grid 重渲染不丢）
+};
+
+function tr(key, vars) {
+  let s = I18N[S.lang][key] ?? I18N.en[key] ?? key;
+  if (vars) for (const k of Object.keys(vars)) s = s.replaceAll("{" + k + "}", String(vars[k]));
+  return s;
+}
+/** 语言偏好：cookie 优先（不区分端口，跨 daemon 重启保留），否则跟随浏览器 */
+function detectLang() {
+  const m = document.cookie.match(/(?:^|;\s*)omt_lang=(en|zh)(?:;|$)/);
+  if (m) return m[1];
+  return (navigator.language || "en").toLowerCase().startsWith("zh") ? "zh" : "en";
+}
+function setLang(lang) {
+  S.lang = lang;
+  document.cookie = "omt_lang=" + lang + "; path=/; max-age=31536000; SameSite=Lax";
+  applyI18n();
+}
+function applyI18n() {
+  document.documentElement.lang = S.lang === "zh" ? "zh-CN" : "en";
+  document.title = tr("doc.title");
+  for (const el of document.querySelectorAll("[data-i18n]")) el.textContent = tr(el.dataset.i18n);
+  for (const el of document.querySelectorAll("[data-i18n-html]")) el.innerHTML = tr(el.dataset.i18nHtml);
+  for (const el of document.querySelectorAll("[data-i18n-placeholder]")) el.placeholder = tr(el.dataset.i18nPlaceholder);
+  for (const el of document.querySelectorAll("[data-i18n-title]")) el.title = tr(el.dataset.i18nTitle);
+  render(); // 动态面（chips/grid/stats/抽屉）经 tr() 重建
+  if ($("createDialog").open) fillInstanceOptions();
+}
+
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" }[c]));
+}
+function fmtDur(ms) {
+  if (ms == null || ms < 0) ms = 0;
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return s + "s";
+  const m = Math.floor(s / 60);
+  if (m < 60) return m + "m";
+  const h = Math.floor(m / 60);
+  return h + "h" + String(m % 60).padStart(2, "0") + "m";
+}
+function fmtBytes(n) {
+  if (n < 1024) return n + " B";
+  if (n < 1048576) return (n / 1024).toFixed(1) + " KiB";
+  return (n / 1048576).toFixed(1) + " MiB";
+}
+function fmtAgo(ms) { return tr("card.ago", { dur: fmtDur(Date.now() - ms) }); }
+function fmtTime(ms) { return ms ? new Date(ms).toLocaleString() : "—"; }
+function shortSession(sid) { return sid.length > 12 ? sid.slice(0, 12) + "…" : sid; }
+
+class ApiError extends Error {
+  constructor(status, body) { super(body?.error || ("HTTP " + status)); this.status = status; this.body = body; }
+}
+async function api(path, opts = {}) {
+  const headers = { ...(opts.headers || {}) };
+  if (opts.body !== undefined) headers["content-type"] = "application/json";
+  const res = await fetch(path, { method: opts.method || "GET", headers, body: opts.body });
+  if (res.status === 401) { S.authFailed = true; throw new ApiError(401, { error: "unauthorized", code: "UNAUTHORIZED" }); }
+  const text = await res.text();
+  let body = null;
+  try { body = text ? JSON.parse(text) : null; } catch { body = text; }
+  if (res.status >= 400) throw new ApiError(res.status, body);
+  return body;
+}
+
+function toast(msg, kind = "ok", sub = null) {
+  const el = document.createElement("div");
+  el.className = "toast" + (kind === "err" ? " err" : kind === "warn" ? " warn" : "");
+  el.innerHTML = esc(msg) + (sub ? '<div class="mono">' + esc(sub) + "</div>" : "");
+  el.onclick = () => el.remove();
+  $("toasts").appendChild(el);
+  setTimeout(() => el.remove(), 4600);
+}
+function errText(e) {
+  if (e instanceof ApiError) {
+    const b = e.body || {};
+    let s = (b.code ? b.code + ": " : "") + (b.error || e.message);
+    if (Array.isArray(b.detail)) s += " — " + b.detail.map((d) => d.field + ": " + d.message).join("; ");
+    else if (b.detail) s += " — " + String(b.detail);
+    return s;
+  }
+  return String(e?.message || e);
+}
+
+/* --- 会话跳转：opencode web 前端路由 {url}/server/{base64(url) 去 padding}/session/{id} --- */
+/** 监听地址 → 可连接地址（service.json 记的是 listen 地址；0.0.0.0/[::] 浏览器不可达，
+ *  归一为 loopback——base64 段与链接基底同用归一值，与 opencode web 实际打开地址一致）。
+ *  scheme 白名单：仅 http(s)——javascript:/data: 等一律 null（注册 service.json 可被
+ *  本地篡改，href 注入是 XSS 向量）；解析失败同样 null。调用方负责 null 降级。 */
+function connectUrl(raw) {
+  try {
+    const u = new URL(raw);
+    if (u.protocol !== "http:" && u.protocol !== "https:") return null;
+    if (u.hostname === "0.0.0.0") u.hostname = "127.0.0.1";
+    else if (u.hostname === "[::]" || u.hostname === "::") u.hostname = "[::1]";
+    return u.toString().replace(/\/$/, "");
+  } catch {
+    return null;
+  }
+}
+function instanceFor(port) {
+  return (S.health?.opencode_instances || []).find((i) => i.port === port) || null;
+}
+function sessionUrl(t) {
+  const inst = instanceFor(t.opencode_port);
+  if (!inst) return null;
+  const url = connectUrl(inst.url);
+  if (url === null) return null;
+  try {
+    const enc = btoa(url).replace(/=+$/, "");
+    return url + "/server/" + enc + "/session/" + encodeURIComponent(t.session_id);
+  } catch {
+    return null; // 非 Latin1 url 等异常：降级为无链接，不卡死渲染
+  }
+}
+
+/* --- 两段式确认 ----------------------------------------------------------- */
+function isArmed(id, action) {
+  const k = id + ":" + action;
+  const exp = S.armed.get(k);
+  if (exp && Date.now() < exp) return true;
+  S.armed.delete(k);
+  return false;
+}
+function arm(id, action) { S.armed.set(id + ":" + action, Date.now() + ARM_WINDOW_MS); }
+function disarm(id, action) { S.armed.delete(id + ":" + action); }
+
+/* --- 轮询 ----------------------------------------------------------------- */
+let timer = null;
+async function tick() {
+  try {
+    const [h, t] = await Promise.all([api("/api/health"), api("/api/tasks")]);
+    S.health = h; S.tasks = Array.isArray(t) ? t : [];
+    S.online = true; S.authFailed = false;
+  } catch (e) {
+    if (!(e instanceof ApiError && e.status === 401)) S.online = false;
+  }
+  render();
+}
+function startPolling() { if (timer === null) { timer = setInterval(tick, POLL_MS); void tick(); } }
+function stopPolling() { if (timer !== null) { clearInterval(timer); timer = null; } }
+document.addEventListener("visibilitychange", () => {
+  // 主轮询与日志跟随轮询同停同启——标签页隐藏期间零请求（与文档行为一致）
+  if (document.hidden) { stopPolling(); stopLogPolling(); }
+  else { startPolling(); if (S.selectedId !== null && S.logFollow && !S.logUnavailable) startLogPolling(); }
+});
+
+/* --- 渲染 ----------------------------------------------------------------- */
+function filteredTasks() {
+  const { state, session, q } = S.filter;
+  const ql = q.trim().toLowerCase();
+  return S.tasks.filter((t) => {
+    if (state === "live" && !LIVE_STATES.has(t.state)) return false;
+    if (state !== "all" && state !== "live" && t.state !== state) return false;
+    if (session && t.session_id !== session) return false;
+    if (ql && !(t.id + " " + (t.description || "") + " " + t.command + " " + t.session_id).toLowerCase().includes(ql)) return false;
+    return true;
+  });
+}
+function sortTasks(list) {
+  const live = list.filter((t) => LIVE_STATES.has(t.state)).sort((a, b) => a.started_at - b.started_at);
+  const done = list.filter((t) => !LIVE_STATES.has(t.state)).sort((a, b) => b.updated_at - a.updated_at);
+  return [...live, ...done];
+}
+
+function render() {
+  $("authBanner").classList.toggle("show", S.authFailed);
+  $("offlineBanner").classList.toggle("show", !S.online && !S.authFailed);
+  const dot = $("statusDot");
+  dot.className = S.online ? "online" : "offline";
+
+  const h = S.health;
+  if (h) {
+    const re = h.reattach;
+    const reTxt = re ? (re.claimed + re.finalized + re.failed > 0
+      ? " · " + tr("stats.reattach") + " " + re.claimed + "✓ " + re.finalized + "⚑ " + re.failed + "✗"
+      : " · " + tr("stats.reattachClean")) : "";
+    $("daemonStats").textContent =
+      "v" + h.version + " · " + tr("stats.up") + " " + fmtDur(h.uptime_s * 1000) +
+      " · " + h.tasks_alive + " " + tr("stats.alive") + " / " + h.tasks_total + " " + tr("stats.total") + reTxt;
+    $("instances").innerHTML = (h.opencode_instances || []).map((i) => {
+      const curl = connectUrl(i.url);
+      const title = esc(i.url + " · pid " + (i.pid_alive ? "alive" : "dead") + (i.version ? " · v" + i.version : ""));
+      const inner = ':' + esc(i.port) + ' <span class="' + (i.reachable ? "ok" : "bad") + '">' + (i.reachable ? "✓" : "✗") + "</span>";
+      // 非 http(s) scheme（connectUrl null）：降级为纯展示 span，不出可点击 href
+      return curl !== null
+        ? '<a class="inst-chip" href="' + esc(curl) + '" target="_blank" rel="noopener" title="' + title + '">' + inner + "</a>"
+        : '<span class="inst-chip" title="' + title + '">' + inner + "</span>";
+    }).join("");
+  } else {
+    $("daemonStats").textContent = S.authFailed ? tr("authRequired") : tr("connecting");
+    $("instances").innerHTML = "";
+  }
+
+  renderChips();
+  renderSessionOptions();
+  renderGrid();
+  if (S.selectedId !== null) updateDrawer();
+}
+
+function renderChips() {
+  const counts = { all: S.tasks.length, live: S.tasks.filter((t) => LIVE_STATES.has(t.state)).length };
+  for (const st of TERMINAL_STATES) counts[st] = S.tasks.filter((t) => t.state === st).length;
+  const defs = [["all", tr("chip.all")], ["live", tr("chip.live")], ...TERMINAL_STATES.map((s) => [s, tr("state." + s)])];
+  $("stateChips").innerHTML = defs.map(([key, label]) =>
+    '<button class="chip' + (S.filter.state === key ? " active" : "") + '" data-state="' + key + '">' +
+    esc(label) + '<span class="n">' + counts[key] + "</span></button>"
+  ).join(" ");
+}
+
+let lastSessionSig = "";
+function renderSessionOptions() {
+  const sel = $("sessionFilter");
+  const sessions = [...new Set(S.tasks.map((t) => t.session_id))].sort();
+  // lang 入签名：语言切换时重建（动态生成的 option 无 data-i18n 标记，扫刷覆盖不到）
+  const sig = S.lang + "|" + sessions.join(",");
+  if (sig === lastSessionSig) return;
+  lastSessionSig = sig;
+  const cur = S.filter.session;
+  sel.innerHTML = '<option value="">' + esc(tr("session.all")) + "</option>" + sessions.map((s) =>
+    '<option value="' + esc(s) + '">' + esc(shortSession(s)) + " (" + S.tasks.filter((t) => t.session_id === s).length + ")</option>"
+  ).join("");
+  sel.value = sessions.includes(cur) ? cur : "";
+  if (sel.value !== cur) S.filter.session = sel.value;
+}
+
+function cardHtml(t) {
+  const live = LIVE_STATES.has(t.state);
+  const subject = t.description || t.command;
+  const url = sessionUrl(t);
+  const armedStop = isArmed(t.id, "stop");
+  let foot;
+  if (t.state === "idle" && t.grace_deadline != null) {
+    // idle 只暴露一个窗口：宽限截止（到期自动停止）；idle_deadline 是其剩余毫秒镜像，同源不另立分支
+    foot = '<span class="arb">⚠ ' + esc(tr("card.autoStop")) + " " + fmtDur(t.grace_deadline - Date.now()) + "</span>";
+  } else if (live) {
+    foot = "<span>⏱ " + fmtDur(Date.now() - t.started_at) + "</span>" + (t.pid != null ? "<span>pid " + esc(t.pid) + "</span>" : "");
+  } else {
+    const exit = t.exit_info ? tr("card.exit") + " " + t.exit_info.code : tr("state." + t.state);
+    foot = '<span class="exit-tag">' + esc(exit) + "</span><span>" + esc(fmtAgo(t.updated_at)) + "</span>";
+  }
+  // 数值字段同样 esc()：store 侧 meta 可被本地篡改，不信任字段形状（esc 纪律无例外）
+  const counters =
+    esc(tr("counter.scan")) + " <b>" + esc(t.lines_scanned) + "</b> · " + esc(tr("counter.hit")) + " <b>" + esc(t.lines_matched) + "</b> · " + esc(tr("counter.sent")) + " <b>" + esc(t.events_sent) + "</b>" +
+    (t.events_dropped > 0 ? ' · <span class="drop">' + esc(tr("counter.drop")) + " <b>" + esc(t.events_dropped) + "</b></span>" : "");
+  return (
+    '<article class="card st-' + esc(t.state) + (S.selectedId === t.id ? " selected" : "") + '" data-id="' + esc(t.id) + '">' +
+    '<div class="card-top">' +
+    '<span class="pill"><span class="dot"></span>' + esc(tr("state." + t.state)) + "</span>" +
+    '<span class="tid mono">' + esc(t.id) + "</span>" +
+    '<span class="card-actions">' +
+    (url
+      ? '<a class="icon-btn" href="' + esc(url) + '" target="_blank" rel="noopener" title="' + esc(tr("card.openSessionTitle")) + '" data-nocard>↗</a>'
+      : '<span class="icon-btn disabled" title="' + esc(tr("card.noLinkTitle")) + '" data-nocard>↗</span>') +
+    (live
+      ? '<button class="icon-btn danger' + (armedStop ? " armed" : "") + '" data-action="stop" data-nocard title="' +
+        esc(armedStop ? tr("card.stopConfirmTitle") : tr("card.stopTitle")) + '">' + (armedStop ? esc(tr("card.stopArmed")) : "■") + "</button>"
+      : "") +
+    "</span></div>" +
+    '<div class="subject" title="' + esc(subject) + '">' + esc(subject) + "</div>" +
+    (t.description ? '<div class="command-line mono" title="' + esc(t.command) + '">' + esc(t.command) + "</div>" : "") +
+    '<div class="meta-line mono" title="' + esc(t.session_id + " · port " + t.opencode_port + " · " + t.directory) + '">' +
+    esc(shortSession(t.session_id)) + " · :" + esc(t.opencode_port) + " · " + esc(t.directory) + "</div>" +
+    '<div class="counters mono">' + counters + "</div>" +
+    '<div class="card-foot">' + foot + "</div>" +
+    "</article>"
+  );
+}
+
+function renderGrid() {
+  const list = sortTasks(filteredTasks());
+  $("grid").innerHTML = list.map(cardHtml).join("");
+  const empty = $("empty");
+  if (list.length === 0) {
+    empty.classList.add("show");
+    const noTasks = S.tasks.length === 0;
+    $("emptyText").textContent = noTasks ? tr("empty.none") : tr("empty.noMatch");
+    $("emptyNewBtn").style.display = noTasks ? "" : "none";
+  } else {
+    empty.classList.remove("show");
+  }
+}
+
+/* --- 抽屉 ----------------------------------------------------------------- */
+let logTimer = null;
+function openDrawer(id) {
+  S.selectedId = id;
+  S.logUnavailable = false;
+  $("logView").textContent = "";
+  $("logNote").textContent = "";
+  $("drawer").classList.add("open");
+  $("scrim").classList.add("show");
+  updateDrawer();
+  startLogPolling();
+  renderGrid();
+}
+function closeDrawer() {
+  S.selectedId = null;
+  $("drawer").classList.remove("open");
+  $("scrim").classList.remove("show");
+  stopLogPolling();
+  renderGrid();
+}
+function selectedTask() { return S.tasks.find((t) => t.id === S.selectedId) || null; }
+
+function updateDrawer() {
+  const t = selectedTask();
+  if (!t) {
+    // 任务被清理（DELETE / sweeper）：抽屉留一行说明，不静默消失
+    $("dState").textContent = tr("state.gone");
+    $("dPill").className = "pill st-stopped";
+    $("dId").textContent = S.selectedId;
+    $("dSubject").textContent = tr("drawer.gone");
+    $("dDetails").innerHTML = "";
+    $("dSessionLink").style.display = "none";
+    $("dStop").style.display = "none";
+    $("dKeepalive").style.display = "none";
+    $("dDelete").style.display = "none";
+    document.querySelector(".patch-row").style.display = "none";
+    stopLogPolling();
+    return;
+  }
+  const live = LIVE_STATES.has(t.state);
+  $("dPill").className = "pill st-" + t.state;
+  $("dState").textContent = tr("state." + t.state);
+  $("dId").textContent = t.id;
+  $("dSubject").textContent = t.description || t.command;
+
+  const url = sessionUrl(t);
+  const link = $("dSessionLink");
+  if (url) { link.style.display = ""; link.href = url; link.title = url; }
+  else { link.style.display = "none"; }
+
+  const stop = $("dStop");
+  stop.style.display = live ? "" : "none";
+  const stopArmed = isArmed(t.id, "stop");
+  stop.classList.toggle("armed", stopArmed);
+  stop.textContent = stopArmed ? tr("drawer.stopConfirm") : tr("drawer.stop");
+  stop.title = stopArmed ? tr("drawer.stopConfirmTitle") : tr("drawer.stopTitle");
+  $("dKeepalive").style.display = t.state === "idle" ? "" : "none";
+  const del = $("dDelete");
+  del.style.display = live ? "none" : "";
+  const delArmed = isArmed(t.id, "delete");
+  del.classList.toggle("armed", delArmed);
+  del.textContent = delArmed ? tr("drawer.deleteConfirm") : tr("drawer.delete");
+
+  document.querySelector(".patch-row").style.display = live ? "" : "none";
+  if (document.activeElement !== $("dMaxEvents")) $("dMaxEvents").value = t.max_events;
+  $("dPatchHint").textContent = tr("drawer.sent") + " " + t.events_sent + " / " + t.max_events;
+
+  const rows = [
+    ["command", t.command],
+    ["directory", t.directory],
+    ["session_id", t.session_id],
+    ["opencode_port", String(t.opencode_port)],
+    ["pattern", t.pattern ?? "—"],
+    ["wake_mode", t.wake_mode, true],
+    ["delivery", t.delivery, true],
+    ["coalesce_ms", String(t.coalesce_ms)],
+    ["idle_timeout_ms", String(t.idle_timeout_ms)],
+    ["pid", t.pid != null ? String(t.pid) : "—"],
+    ["started_at", fmtTime(t.started_at)],
+    ["updated_at", fmtTime(t.updated_at)],
+    ["exit_info", t.exit_info ? t.exit_info.code + " (" + t.exit_info.reason + ")" : "—"],
+    ["log_bytes", fmtBytes(t.log_bytes)],
+    ["last_offset", String(t.last_offset)],
+    ["lines_scanned", String(t.lines_scanned)],
+    ["lines_matched", String(t.lines_matched)],
+    ["events_sent", String(t.events_sent)],
+    ["events_dropped", String(t.events_dropped)],
+  ];
+  if (t.state === "idle" && t.grace_deadline != null) rows.push(["grace_deadline", fmtTime(t.grace_deadline) + " " + tr("drawer.autoStop")]);
+  $("dDetails").innerHTML = rows.map(([k, v, plain]) =>
+    "<dt>" + k + '</dt><dd class="' + (plain ? "plain" : "") + '">' + esc(v) + "</dd>"
+  ).join("");
+}
+
+async function fetchLog() {
+  if (S.selectedId === null || S.logUnavailable) return;
+  try {
+    const text = await api("/api/tasks/" + encodeURIComponent(S.selectedId) + "/log?tail=" + S.logTail);
+    const pre = $("logView");
+    const atBottom = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 30;
+    pre.textContent = typeof text === "string" && text !== "" ? text : tr("log.empty");
+    if (S.logFollow && atBottom) pre.scrollTop = pre.scrollHeight;
+    $("logNote").textContent = "";
+  } catch (e) {
+    if (e instanceof ApiError && e.status === 404) {
+      S.logUnavailable = true;
+      stopLogPolling();
+      $("logView").textContent = "";
+      $("logNote").textContent = tr("log.unavailable");
+    } else if (!(e instanceof ApiError && e.status === 401)) {
+      $("logNote").textContent = tr("log.fetchFailed") + errText(e);
+    }
+  }
+}
+function startLogPolling() {
+  stopLogPolling();
+  void fetchLog();
+  if (S.logFollow) logTimer = setInterval(fetchLog, POLL_MS);
+}
+function stopLogPolling() { if (logTimer !== null) { clearInterval(logTimer); logTimer = null; } }
+
+/* --- 操控 ----------------------------------------------------------------- */
+async function doStop(id) {
+  try {
+    const info = await api("/api/tasks/" + encodeURIComponent(id) + "/stop", { method: "POST" });
+    toast(tr("toast.stopped", { id }), "ok", tr("toast.state") + ": " + info.state + (info.exit_info ? " · exit " + info.exit_info.code : ""));
+  } catch (e) { toast(tr("toast.stopFailed") + errText(e), "err"); }
+  disarm(id, "stop");
+  void tick();
+}
+async function doKeepalive(id) {
+  try {
+    await api("/api/tasks/" + encodeURIComponent(id) + "/keepalive", { method: "POST" });
+    toast(tr("toast.keepalive"), "ok", id);
+  } catch (e) { toast(tr("toast.keepaliveFailed") + errText(e), "err"); }
+  void tick();
+}
+async function doDelete(id) {
+  try {
+    await api("/api/tasks/" + encodeURIComponent(id), { method: "DELETE" });
+    toast(tr("toast.deleted", { id }));
+    if (S.selectedId === id) closeDrawer();
+  } catch (e) { toast(tr("toast.deleteFailed") + errText(e), "err"); }
+  disarm(id, "delete");
+  void tick();
+}
+async function doPatch(id) {
+  const v = Number($("dMaxEvents").value);
+  if (!Number.isInteger(v) || v < 1 || v > 10000) { toast(tr("toast.patchRange"), "err"); return; }
+  try {
+    await api("/api/tasks/" + encodeURIComponent(id), { method: "PATCH", body: JSON.stringify({ max_events: v }) });
+    toast(tr("toast.patched", { v }), "ok", id);
+  } catch (e) { toast(tr("toast.patchFailed") + errText(e), "err"); }
+  void tick();
+}
+async function doShutdown() {
+  const kill = $("shutdownKill").checked;
+  try {
+    const r = await api("/api/shutdown", { method: "POST", body: JSON.stringify({ kill_tasks: kill }) });
+    toast(kill ? tr("toast.shutdownKilled", { n: r.killed }) : tr("toast.shutdown"), "warn");
+    $("helpDialog").close();
+  } catch (e) { toast(tr("toast.shutdownFailed") + errText(e), "err"); }
+  disarm("daemon", "shutdown");
+  void tick();
+}
+
+/* --- 创建 ----------------------------------------------------------------- */
+function fillInstanceOptions() {
+  const sel = $("createInstance");
+  const insts = S.health?.opencode_instances || [];
+  sel.innerHTML = insts.length === 0
+    ? '<option value="">' + esc(tr("create.noInstance")) + "</option>"
+    : insts.map((i) =>
+        '<option value="' + esc(i.port) + '">:' + esc(i.port) + " · " + esc(connectUrl(i.url) ?? i.url) + (i.reachable ? " ✓" : " ✗ " + esc(tr("create.unreachable"))) + "</option>"
+      ).join("");
+  $("createSubmit").disabled = insts.length === 0;
+}
+function openCreate() {
+  fillInstanceOptions();
+  $("formError").classList.remove("show");
+  $("createDialog").showModal();
+}
+async function submitCreate(ev) {
+  ev.preventDefault();
+  const f = new FormData($("createForm"));
+  const payload = {
+    command: String(f.get("command") || "").trim(),
+    opencode_port: Number(f.get("opencode_port")),
+    session_id: String(f.get("session_id") || "").trim(),
+  };
+  const desc = String(f.get("description") || "").trim();
+  if (desc) payload.description = desc;
+  const dir = String(f.get("directory") || "").trim();
+  if (dir) payload.directory = dir;
+  const pattern = String(f.get("pattern") || "").trim();
+  if (pattern) payload.pattern = pattern;
+  const wake = String(f.get("wake_mode") || "");
+  if (wake) payload.wake_mode = wake;
+  const delivery = String(f.get("delivery") || "");
+  if (delivery) payload.delivery = delivery;
+  for (const k of ["coalesce_ms", "max_events", "idle_timeout_ms"]) {
+    const raw = String(f.get(k) || "").trim();
+    if (raw !== "") payload[k] = Number(raw);
+  }
+  const errBox = $("formError");
+  errBox.classList.remove("show");
+  $("createSubmit").disabled = true;
+  try {
+    const info = await api("/api/tasks", { method: "POST", body: JSON.stringify(payload) });
+    $("createDialog").close();
+    $("createForm").reset();
+    toast(tr("toast.created", { id: info.id }), "ok", info.description || info.command);
+    S.tasks.push(info); // 创建快照预填：openDrawer 立即有数据可渲染，不等 tick 往返（防 gone 闪现）
+    void tick();
+    openDrawer(info.id);
+  } catch (e) {
+    errBox.innerHTML = esc(errText(e));
+    errBox.classList.add("show");
+  } finally {
+    $("createSubmit").disabled = !$("createInstance").value;
+  }
+}
+
+/* --- 事件接线 -------------------------------------------------------------- */
+$("stateChips").addEventListener("click", (e) => {
+  const chip = e.target.closest("[data-state]");
+  if (!chip) return;
+  S.filter.state = chip.dataset.state;
+  renderChips();
+  renderGrid();
+});
+$("sessionFilter").addEventListener("change", (e) => { S.filter.session = e.target.value; renderGrid(); });
+$("search").addEventListener("input", (e) => { S.filter.q = e.target.value; renderGrid(); });
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && S.selectedId !== null && !$("createDialog").open && !$("helpDialog").open && !$("settingsDialog").open) closeDrawer();
+  if (e.key === "/" && document.activeElement.tagName !== "INPUT" && document.activeElement.tagName !== "TEXTAREA" && document.activeElement.tagName !== "SELECT") {
+    e.preventDefault();
+    $("search").focus();
+  }
+});
+
+$("grid").addEventListener("click", (e) => {
+  const actionEl = e.target.closest("[data-action]");
+  if (actionEl) {
+    e.stopPropagation();
+    const card = actionEl.closest("[data-id]");
+    const id = card.dataset.id;
+    const action = actionEl.dataset.action;
+    if (action === "stop") {
+      if (isArmed(id, "stop")) void doStop(id);
+      else { arm(id, "stop"); renderGrid(); }
+    }
+    return;
+  }
+  if (e.target.closest("[data-nocard]")) return; // 跳转链接等不触发抽屉
+  const card = e.target.closest("[data-id]");
+  if (card) openDrawer(card.dataset.id);
+});
+
+$("authReload").addEventListener("click", () => location.reload());
+$("drawerClose").addEventListener("click", closeDrawer);
+$("scrim").addEventListener("click", closeDrawer);
+$("dStop").addEventListener("click", () => {
+  const id = S.selectedId;
+  if (id === null) return;
+  if (isArmed(id, "stop")) void doStop(id);
+  else { arm(id, "stop"); updateDrawer(); }
+});
+$("dKeepalive").addEventListener("click", () => { if (S.selectedId !== null) void doKeepalive(S.selectedId); });
+$("dDelete").addEventListener("click", () => {
+  const id = S.selectedId;
+  if (id === null) return;
+  if (isArmed(id, "delete")) void doDelete(id);
+  else { arm(id, "delete"); updateDrawer(); }
+});
+$("dApply").addEventListener("click", () => { if (S.selectedId !== null) void doPatch(S.selectedId); });
+$("logTail").addEventListener("change", (e) => { S.logTail = Number(e.target.value); void fetchLog(); });
+$("logFollow").addEventListener("change", (e) => {
+  S.logFollow = e.target.checked;
+  if (S.selectedId !== null) startLogPolling();
+});
+$("logRefresh").addEventListener("click", () => {
+  S.logUnavailable = false;
+  if (S.logFollow) startLogPolling();
+  else void fetchLog();
+});
+
+$("newTaskBtn").addEventListener("click", openCreate);
+$("emptyNewBtn").addEventListener("click", openCreate);
+$("createClose").addEventListener("click", () => $("createDialog").close());
+$("createCancel").addEventListener("click", () => $("createDialog").close());
+$("createForm").addEventListener("submit", submitCreate);
+
+$("settingsBtn").addEventListener("click", () => {
+  $("langSelect").value = S.lang;
+  $("settingsDialog").showModal();
+});
+$("settingsClose").addEventListener("click", () => $("settingsDialog").close());
+$("langSelect").addEventListener("change", (e) => setLang(e.target.value));
+
+$("helpBtn").addEventListener("click", () => $("helpDialog").showModal());
+$("helpClose").addEventListener("click", () => $("helpDialog").close());
+$("shutdownBtn").addEventListener("click", () => {
+  if (isArmed("daemon", "shutdown")) void doShutdown();
+  else {
+    arm("daemon", "shutdown");
+    const b = $("shutdownBtn");
+    b.classList.add("armed");
+    b.textContent = tr("help.shutdownConfirm");
+    setTimeout(() => {
+      if (!isArmed("daemon", "shutdown")) { b.classList.remove("armed"); b.textContent = tr("help.shutdown"); }
+    }, ARM_WINDOW_MS + 60);
+  }
+});
+
+S.lang = detectLang();
+applyI18n();
+startPolling();
+</script>
+</body>
+</html>

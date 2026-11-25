@@ -36,6 +36,13 @@ hot-reloads; tasks run in their own process groups with file-based pipes
   rows — state icons, adjudication countdowns, exit codes, terminal-task
   folding; `server offline` / `unreachable` states included. Display-only by
   design: a dead panel never affects monitoring.
+- **Self-hosted web dashboard**: the daemon serves a single-file dashboard at
+  its own URL (`GET /`, same port, same auth) — task board with live counters
+  and idle auto-stop countdowns, detail drawer with follow-mode log tail,
+  stop/keepalive/delete/quota controls, a create form, and one-click jumps to
+  the destination session in opencode web. Works in any browser tab alongside
+  TUI / web / desktop; no opencode UI dependency (the web build never loads
+  plugin GUIs). Sign in with `opencode service get password`.
 
 ## Requirements
 
@@ -165,6 +172,56 @@ Semantics worth knowing:
   4xx, discovery diagnostics carrying pid / service.json / server.log paths)
   return `error: …` / `hint: …` instead of throwing; unexpected errors throw.
 
+## Web dashboard
+
+The daemon hosts its own dashboard — open the daemon URL from
+`$XDG_STATE_HOME/opencode-monitor-task/service.json` (the `url` field) in any
+browser. Same port as the API, same Basic auth:
+
+- **Username**: `monitor`
+- **Password**: `opencode service get password` — any registered opencode
+  instance's current password works (read live; rotation after an opencode
+  restart is picked up automatically). The daemon's own `service.json`
+  password remains valid too (that is what the plugin discovery channel uses).
+
+**Credential equivalence is a real grant**: any accepted password unlocks the
+full API — including task creation, i.e. command execution as your user in any
+absolute directory (the plugin's workspace guard does not apply). Treat the
+opencode password as shell-equivalent on the daemon host; if that is not what
+you want, start the daemon with `--no-alt-passwords` to accept only its own
+`service.json` password.
+
+The browser shows its native sign-in dialog on first visit (the daemon sends
+`WWW-Authenticate` on 401); afterwards same-origin API calls carry the cached
+credentials automatically.
+
+What you get:
+
+- **Board**: all tasks across sessions with state-colored cards (the TUI icon
+  set), description-first subjects, scan/hit/sent/drop counters, the idle
+  grace (auto-stop) countdown, exit codes; filter by state or session,
+  free-text search. Polls every second, paused while the tab is hidden.
+- **Detail drawer**: full metadata, log tail (20–1000 lines, follow mode),
+  and controls — stop / delete (two-click confirm), keepalive, `max_events`
+  adjustment.
+- **Create form**: the same parameters as the `monitor` tool; the destination
+  instance is picked from the daemon's registry whitelist, `session_id` is
+  entered manually (the server verifies it is live). Optional fields left
+  empty fall through to server defaults.
+- **Session jump**: ↗ opens the notification destination in opencode web
+  (`{instance}/server/{base64(instance)}/session/{session_id}`).
+- **Settings (⚙)**: language switch, English / 中文. Defaults to the browser
+  language; the choice is stored in a cookie on the host (cookies ignore
+  ports, so it survives daemon restarts and port changes). Parameter names
+  (`command`, `max_events`, …) and raw API error text stay English by design.
+
+Notes: creating a task here is equivalent to calling the API directly — the
+plugin's workspace guard does not apply, and `directory` must be an absolute
+path. Log tail is only available while the task record lives in the registry.
+The dashboard is a pure client of the existing API (no extra endpoints) and
+ships inside the single-file bundle; see
+[ARCHITECTURE.md §15](docs/ARCHITECTURE.md) for design and security posture.
+
 ## Development
 
 Documentation map: [ARCHITECTURE.md](docs/ARCHITECTURE.md) (system design),
@@ -186,7 +243,9 @@ node --import tsx scripts/verify-m5.ts       # crash recovery / reattach
 node --import tsx scripts/verify-m6.ts       # TUI dataflow acceptance
 node --import tsx scripts/verify-m7.ts       # plugin-tools acceptance
 node --import tsx scripts/verify-m8.ts       # permission audit acceptance
+node --import tsx scripts/verify-ui.ts       # web dashboard acceptance (auth/link/control loop)
 node --import tsx scripts/storm-sim.ts       # notification-storm simulation
+node scripts/gen-ui.mjs                      # regenerate ui-html.ts after editing ui.html
 ```
 
 All `verify-*` and `storm-sim` scripts resolve the server form the same way
@@ -220,7 +279,26 @@ Diagnostics go to `$XDG_STATE_HOME/opencode-monitor-task/tui.log` with
 
 The daemon listens on 127.0.0.1 only, with random-port + random-password
 service discovery (`$XDG_STATE_HOME/opencode-monitor-task/service.json`,
-mode 600). Task notifications are wrapped in escaped envelopes; still, do not
+mode 600). The web dashboard adds no endpoints beyond the API, but it does
+widen the credential set: by default the live passwords of registered opencode
+instances authenticate too (`opencode service get password` doubles as the
+dashboard login — and as full API access, see the equivalence note above;
+`--no-alt-passwords` opts out).
+
+Because Basic auth credentials are ambient (the browser attaches cached
+credentials to cross-site requests as well, and form navigations reach
+loopback), the API enforces CSRF fences: POST/PATCH requests that carry a
+`Content-Type` must use `application/json` (415 otherwise — form-encoded
+bodies are rejected even when empty), and `Sec-Fetch-Site: cross-site`
+state-changing requests are rejected (403). Direct API callers should send
+`Content-Type: application/json` with JSON bodies (all first-party clients
+do); a bare `curl -X POST` without the header still works for bodyless calls.
+All responses carry `X-Content-Type-Options: nosniff`; the dashboard's CSP
+pins its inline script by sha256 hash. See
+[SECURITY-REVIEW-UI.md](docs/SECURITY-REVIEW-UI.md) for the full audit and
+fix record.
+
+Task notifications are wrapped in escaped envelopes; still, do not
 monitor streams that untrusted parties can write to — monitored output is
 delivered into your agent's context.
 

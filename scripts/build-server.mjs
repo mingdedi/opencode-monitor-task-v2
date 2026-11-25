@@ -15,8 +15,12 @@ import { build } from "esbuild";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { genUi } from "./gen-ui.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+
+// 看板资产先行再生成：ui.html 是唯一编辑入口，bundle 恒内嵌最新生成物
+genUi();
 
 // 版本一致性围栏：bundle 形态读根 package.json，源码形态读 packages/server/package.json
 const rootVersion = JSON.parse(readFileSync(path.join(ROOT, "package.json"), "utf8")).version;

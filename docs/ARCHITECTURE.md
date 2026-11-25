@@ -90,10 +90,29 @@ reattach）；仅 `--shutdown-all` 显式参数击杀全部任务进程组；`PO
 ## 4. 服务端 HTTP API
 
 鉴权统一 `Authorization: Basic base64("monitor:" + password)`，未授权 401 JSON
-（timingSafeEqual 比较）。仅监听 `127.0.0.1` 随机端口。
+（timingSafeEqual 比较）+ `WWW-Authenticate: Basic realm="opencode-monitor-task"`
+（浏览器原生登录框触发器）。password 候选 = daemon 自身密码 + 注册 opencode 实例的
+**当前**密码（`readInstancePasswords` 懒读现读：仅 Basic 头存在且自身密码未命中时
+读文件，零缓存——opencode 重启轮换即时生效，未鉴权请求零文件 I/O；浏览器登录复用
+`opencode service get password` 即可，插件发现通道仍用 daemon service.json 密码，
+互不影响）。**凭证等价即全权**：任一候选命中 = API 全权（含创建任务执行命令）——
+`--no-alt-passwords` 启动开关关闭等价，仅 daemon 自身密码有效。仅监听 `127.0.0.1`
+随机端口。
+
+**CSRF 围栏**（Basic auth 凭证 ambient：浏览器缓存后跨站请求也自动携带，无
+SameSite 约束；Chrome LNA 不拦顶层表单导航——loopback/防火墙不构成边界）：
+
+- POST/PATCH 携带 `Content-Type` 时必须 `application/json`（参数容忍），否则 415
+  `UNSUPPORTED_MEDIA_TYPE`。表单 CSRF 只能发 form 系类型（空表单也带）→ 全拒；
+  无头请求放行（`curl -X POST` 兼容）。第一方客户端（shared client / 看板 /
+  verify 脚本）均发 JSON 头或省略头。
+- `Sec-Fetch-Site: cross-site` 的状态变更方法（POST/PATCH/DELETE）一律 403
+  `CROSS_SITE_REJECTED`（纵深；GET 只读不受限，跨源读本已被无 CORS 头拦截）。
+- 全部响应（JSON 与看板）带 `X-Content-Type-Options: nosniff`。
 
 | 端点 | 方法 | 用途 |
 |---|---|---|
+| `/` | GET/HEAD | 自托管 Web 看板（单文件 HTML，与 API 同端口同鉴权；§15） |
 | `/api/health` | GET | 存活/版本/uptime/任务计数/reattach 结果/opencode 实例白名单（发现-创建判据） |
 | `/api/tasks` | POST | 创建任务 → 201 + PublicInfo；body 256KB 上限（413） |
 | `/api/tasks?session_id=` | GET | 任务列表（registry 与 TaskStore 合并视图；可按会话过滤） |
@@ -291,7 +310,9 @@ opencode-monitor-task-v2/            # monorepo（npm workspaces）
 │   │   ├── deliver.ts               #   deliverChain 保序 + 重试 + pending 落盘
 │   │   ├── opencode.ts              #   §2 官方契约封装层（SDK + synthetic/inbox 手写）
 │   │   ├── taskstore.ts             #   meta/log/exit/pending 持久化 + 原子写
-│   │   └── sweeper.ts               #   TTL 清理
+│   │   ├── sweeper.ts               #   TTL 清理
+│   │   ├── ui.html                  #   Web 看板唯一编辑入口（单文件 vanilla，§15）
+│   │   └── ui-html.ts               #   生成物（gen-ui.mjs；esbuild 内嵌 bundle；漂移门禁）
 │   └── plugin/                      # opencode 插件（薄）
 │       ├── index.ts                 #   Plugin.define 组装 + 三工具注册
 │       ├── tools.ts                 #   三工具 schema 与转发
@@ -299,7 +320,7 @@ opencode-monitor-task-v2/            # monorepo（npm workspaces）
 │       └── runtime.ts               #   resolveRuntime 探测链
 ├── src/tui/                         # TUI 面板（读服务端 API，展示层豁免区）
 ├── test/                            # node:test + tsx（零 mock 框架，可注入 clock/fetch）
-├── scripts/                         # verify-m* 验收 / storm-sim / probe / build
+├── scripts/                         # verify-m*/verify-ui 验收 / storm-sim / probe / build / gen-ui
 └── docs/                            # 契约实测与设计文档
 ```
 
@@ -318,3 +339,69 @@ monitor 生命周期若绑在 opencode 插件进程上（插件会被热重载�
 生命周期零耦合；服务端不随 opencode 重启，恢复失败显式标 `parked` 可见；任务状态
 落盘（meta/log/exit），磁盘即真相；对 opencode 的交互只走官方 HTTP API 并有
 spec 快照契约测试；代码按单一职责模块拆分（discriminated union 状态）。
+
+## 15. Web 看板（daemon 自托管，web 场景的正解）
+
+**动机**：opencode web 构建不加载插件 GUI part（PLUGIN-CONTRACT ⑦ 实测：仅
+Desktop/Electron 窗口加载 `gui-experimental`），且 GUI API 整体标记 experimental。
+看板因此不做宿主插件，而是 daemon 自己的 HTTP 客户端页面——**与 API 同端口同鉴权**，
+浏览器开 daemon url 即用，TUI / web / desktop 任何模式下都是一个独立 tab，
+零宿主依赖、零实验特性。
+
+**资产形态**：`packages/server/src/ui.html` 是唯一编辑入口（vanilla HTML/CSS/JS
+单文件，零外部资源、离线可用）；`scripts/gen-ui.mjs` 生成 `ui-html.ts`
+（JSON.stringify 字符串字面量），esbuild 随 bundle 内嵌——**单文件发布形态不破**，
+tsx 源码形态与 bundle 形态共用同一 import，零 loader 魔法。生成物提交入库，
+`test/ui-asset.test.ts` 逐字节漂移门禁（改 ui.html 忘再生成即红）。
+
+**鉴权**：与 API 完全同一套（§4）。401 带 `WWW-Authenticate` → 浏览器原生登录框；
+username `monitor`，password 用 `opencode service get password`（任一注册实例的
+当前密码，现读零缓存）或 daemon service.json 自身密码。登录后浏览器缓存凭证，
+同源 fetch 自动携带——页面是现有 API 的**纯客户端，零新增端点**。opencode 重启
+轮换密码后 fetch 401 → 页面横幅提示 reload 重新登录。
+
+**功能面**（全部映射现有端点）：
+
+- 顶栏：health（版本/uptime/活总计数/reattach 结果）+ opencode 实例白名单 chips
+  （端口/可达性，点击开 opencode web）
+- 任务看板：8 态色卡（图标沿用 TUI 字形 ◐●○✔✘■⊘⚑）、description 优先、
+  scan/hit/sent/drop 计数、idle 宽限（自动停止）倒计时、退出码；状态/session 过滤 + 搜索
+- 详情抽屉：全量元数据 + 日志尾部（tail 20–1000、follow 自动刷新贴底）+
+  操控（stop/keepalive/delete 两段式确认、PATCH max_events）
+- 创建表单：command/description/pattern/wake_mode/delivery/coalesce/max_events/
+  idle_timeout/directory + 目的地（实例下拉 = health 白名单，session_id 手填，
+  服务端校验存活）；可选字段留空 = 省略 → 服务端默认值权威，UI 不复制默认值
+- **会话跳转**：任务目的地一键开 opencode web 会话——
+  `{instance.url}/server/{base64(instance.url) 去 padding}/session/{session_id}`
+  （opencode web 前端路由，verify-ui 真机 200 实证）；端口不在注册表则禁用。
+  service.json 记的是监听地址：`0.0.0.0`/`[::]` 在展示层归一为 loopback
+  （浏览器不可达 0.0.0.0），base64 段与链接基底同用归一值
+- **设置（⚙）与 i18n**：en/zh 双语字典（`EN`/`ZH` 每行一键）+ `data-i18n*`
+  静态标记扫刷 + 动态面 `tr()` 重建；默认跟随浏览器语言，偏好存 cookie
+  （cookie 不区分端口——daemon 重启换端口后保留；localStorage 按 origin 隔离会丢）。
+  参数名与 API 错误原文按设计保留英文。`test/ui-asset.test.ts` 门禁：
+  双语 key parity + 使用面（标记/tr 调用）全覆盖
+
+**安全面**（审查与修复记录见 docs/SECURITY-REVIEW-UI.md）：
+
+- **端点零新增，凭证集合有扩大**：页面能做的与持密码直调 API 完全等价（含创建
+  任务执行命令——与 agent shell 工具同级，validate 防呆非安全边界）；而 altPasswords
+  使任一注册 opencode 实例密码并列有效——opencode 密码即 daemon 宿主 shell 执行权，
+  `--no-alt-passwords` 可关闭等价（§4）。页面创建不经插件工作区守卫（与直调 API
+  同级信任），directory 须绝对路径。
+- **CSRF 围栏**：Basic auth 凭证 ambient（跨站自动携带）——Content-Type 强制 +
+  Sec-Fetch-Site 纵深，见 §4。
+- **响应头**：CSP `default-src 'none'` + `connect-src 'self'`、`no-store`、
+  `nosniff`（全局）、`no-referrer`；`script-src` 用内联脚本块 **sha256 hash**
+  （资产静态，createServer 时一次计算，`uiSecurityHeaders` 导出供门禁）——CSP 是
+  esc() 之外的第二道 XSS 闸；样式保留内联白名单。markup 零 on* 属性（事件一律
+  addEventListener——hash 不覆盖内联处理器）。
+- **注入纪律无例外**：一切任务侧字符串经 esc() 入 HTML——含 state 与数值字段
+  （store 侧 meta 可被本地篡改，不信任字段形状）；日志走 textContent（被监控输出
+  不可信）；实例/会话链接仅 http(s) scheme——connectUrl 统一白名单（javascript: 等
+  一律 null 降级），服务端 probeInstances/resolveTarget 同拒非 http(s) 条目。
+
+**验收**：`scripts/verify-ui.ts`（双形态同判据）：同端口鉴权矩阵、opencode 密码
+登录、hash CSP、CSRF 围栏探针（415/403）、会话链接真机可达、创建→日志→PATCH→
+stop→DELETE 闭环、idle keepalive 复活、shutdown 清理。
+`test/ui-asset.test.ts` 另有 hash CSP 漂移门禁与零内联处理器门禁。
